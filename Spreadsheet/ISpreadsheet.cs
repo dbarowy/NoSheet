@@ -2,9 +2,10 @@
 {
     public interface ISpreadsheet
     {
-        public void InsertValue(AST.Address address, string value);
-        public string GetValue(AST.Address address);
-        public string GetFormula(AST.Address address);
-        public bool IsFormula(AST.Address address);
+        void InsertValue(AST.Address address, string value);
+        string GetValue(AST.Address address);
+        void InsertFormula(AST.Address address, string formula);
+        string GetFormula(AST.Address address);
+        bool IsFormula(AST.Address address);
     }    
 }

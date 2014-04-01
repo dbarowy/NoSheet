@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 2012
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "ExcelParser", "parcel\Parcel\ExcelParser.fsproj", "{6DE2A2B9-C029-4BDB-8992-D16276471D9F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AbstractSpreadsheet", "Spreadsheet\AbstractSpreadsheet.csproj", "{6614E44E-52D3-4437-A140-0224B58FD100}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spreadsheet", "Spreadsheet\Spreadsheet.csproj", "{6614E44E-52D3-4437-A140-0224B58FD100}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
