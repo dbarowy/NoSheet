@@ -18,9 +18,9 @@ namespace NoSheet
         private Dictionary<string, Excel.Worksheet> _wss = new Dictionary<string, Excel.Worksheet>();
 
         // data storage
-        private Dictionary<AST.Address, string> _data = new Dictionary<AST.Address, string>();
-        private Dictionary<AST.Address, string> _formulas = new Dictionary<AST.Address, string>();
-        private Dictionary<AST.Address, AST.Expression> _graph_roots = new Dictionary<AST.Address, AST.Expression>();
+        private Dictionary<SpreadsheetAST.Address, string> _data = new Dictionary<SpreadsheetAST.Address, string>();
+        private Dictionary<SpreadsheetAST.Address, string> _formulas = new Dictionary<SpreadsheetAST.Address, string>();
+        private Dictionary<SpreadsheetAST.Address, SpreadsheetAST.Expression> _graph_roots = new Dictionary<SpreadsheetAST.Address, SpreadsheetAST.Expression>();
 
         // init dirty bits (key is A1 worksheet name)
         private Dictionary<string, bool> _dirty_sheets = new Dictionary<string, bool>();
@@ -95,7 +95,7 @@ namespace NoSheet
                     if (buf2d[i, j] != null)
                     {
                         // calculate address
-                        var addr = AST.Address.NewFromR1C1(i + y_del, j + x_del, wsname, wbname, wbpath);
+                        var addr = SpreadsheetAST.Address.NewFromR1C1(i + y_del, j + x_del, wsname, wbname, wbpath);
 
                         // data case
                         if (celltype == CellType.Data)
@@ -122,7 +122,7 @@ namespace NoSheet
                                 FSharpOption<string> wbpath)
         {
             // calculate address
-            var addr = AST.Address.NewFromR1C1(top, left, wsname, wbname, wbpath);
+            var addr = SpreadsheetAST.Address.NewFromR1C1(top, left, wsname, wbname, wbpath);
 
             // value2
             var v2 = System.Convert.ToString(cell.Value2);
@@ -222,25 +222,49 @@ namespace NoSheet
 
         private void ConstructDependenceGraph()
         {
+            // storage for formula ASTs
+            var astd = new Dictionary<SpreadsheetAST.Address, SpreadsheetAST.Expression>();
+
             // parse every formula, associating each AST with an address
-            // TODO
+            foreach (KeyValuePair<SpreadsheetAST.Address, string> pair in _formulas)
+            {
+                var a = pair.Key;
+                var f = pair.Value;
+
+                astd.Add(a, ExcelParserUtility.ParseFormulaWithAddress(f, a));
+            }
 
             // flatten into abstract syntax DAG
-            // TODO
+            
         }
 
-        private Excel.Range GetCOMCell(AST.Address address)
+        private Excel.Range GetCOMCell(SpreadsheetAST.Address address)
         {
             var cell_ws = address.A1Worksheet();
             return _wss[cell_ws].get_Range(address.A1Local());
         }
 
-        private Excel.Range GetCOMRange(AST.Range range)
+        private Excel.Range GetCOMRange(SpreadsheetAST.Range range)
         {
             return _wss[range.GetWorksheetName()].get_Range(range.TopLeftAddress(), range.BottomRightAddress());
         }
 
-        private IEnumerable<AST.Range> GetReferencesFromFormula(string formula, Excel.Workbook wb, Excel.Worksheet ws)
+        private static SpreadsheetAST.Address AddressFromCOMObject(Excel.Range com, Excel.Workbook wb) {
+            var wsname = com.Worksheet.Name;
+            var wbname = wb.Name;
+            var path = System.IO.Path.GetDirectoryName(wb.FullName);
+            var addr = com.get_Address(true,
+                                       true,
+                                       Excel.XlReferenceStyle.xlR1C1,
+                                       Type.Missing,
+                                       Type.Missing);
+             return SpreadsheetAST.Address.FromString(addr,
+                                           FSharpOption<string>.Some(wsname),
+                                           FSharpOption<string>.Some(wbname),
+                                           FSharpOption<string>.Some(path));
+        }
+
+        private IEnumerable<SpreadsheetAST.Range> GetReferencesFromFormula(string formula, Excel.Workbook wb, Excel.Worksheet ws)
         {
             throw new NotImplementedException();
         }
@@ -270,7 +294,7 @@ namespace NoSheet
             GC.Collect();
         }
 
-        public void InsertValue(AST.Address address, string value)
+        public void InsertValue(SpreadsheetAST.Address address, string value)
         {
             // insert into local storage
             if (_data.ContainsKey(address))
@@ -286,7 +310,7 @@ namespace NoSheet
             _dirty_sheets[address.A1Worksheet()] = true;
         }
 
-        public string GetValue(AST.Address address)
+        public string GetValue(SpreadsheetAST.Address address)
         {
             if (_dirty_sheets.ContainsValue(true))
             {
@@ -303,12 +327,12 @@ namespace NoSheet
             }
         }
 
-        public void InsertFormula(AST.Address address, string formula)
+        public void InsertFormula(SpreadsheetAST.Address address, string formula)
         {
             throw new NotImplementedException();
         }
 
-        public string GetFormula(AST.Address address)
+        public string GetFormula(SpreadsheetAST.Address address)
         {
             string formula;
             if (_formulas.TryGetValue(address, out formula))
@@ -321,7 +345,7 @@ namespace NoSheet
             }
         }
 
-        public bool IsFormula(AST.Address address)
+        public bool IsFormula(SpreadsheetAST.Address address)
         {
             return _formulas.ContainsKey(address);
         }
