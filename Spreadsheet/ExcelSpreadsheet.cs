@@ -15,11 +15,12 @@ namespace NoSheet
         // COM handles
         private Excel.Application _app;
         private Excel.Workbook _wb;
-        private HashSet<Excel.Worksheet> _wss = new HashSet<Excel.Worksheet>();
+        private Dictionary<string, Excel.Worksheet> _wss = new Dictionary<string, Excel.Worksheet>();
 
         // data storage
         private Dictionary<AST.Address, string> _data = new Dictionary<AST.Address, string>();
         private Dictionary<AST.Address, string> _formulas = new Dictionary<AST.Address, string>();
+        private Dictionary<AST.Address, AST.Expression> _graph_roots = new Dictionary<AST.Address, AST.Expression>();
 
         // init dirty bits (key is A1 worksheet name)
         private Dictionary<string, bool> _dirty_sheets = new Dictionary<string, bool>();
@@ -67,9 +68,9 @@ namespace NoSheet
 
         private void TrackWorksheet(Excel.Worksheet w)
         {
-            if (!_wss.Contains(w))
+            if (!_wss.ContainsKey(w.Name))
             {
-                _wss.Add(w);
+                _wss.Add(w.Name, w);
                 _dirty_sheets.Add(w.Name, true);
             }
         }
@@ -219,15 +220,41 @@ namespace NoSheet
             return _app.Workbooks[1];
         }
 
+        private void ConstructDependenceGraph()
+        {
+            // parse every formula, associating each AST with an address
+            // TODO
+
+            // flatten into abstract syntax DAG
+            // TODO
+        }
+
+        private Excel.Range GetCOMCell(AST.Address address)
+        {
+            var cell_ws = address.A1Worksheet();
+            return _wss[cell_ws].get_Range(address.A1Local());
+        }
+
+        private Excel.Range GetCOMRange(AST.Range range)
+        {
+            return _wss[range.GetWorksheetName()].get_Range(range.TopLeftAddress(), range.BottomRightAddress());
+        }
+
+        private IEnumerable<AST.Range> GetReferencesFromFormula(string formula, Excel.Workbook wb, Excel.Worksheet ws)
+        {
+            throw new NotImplementedException();
+        }
+
         public void Dispose()
         {
             // release each worksheet COM object
-            foreach (Excel.Worksheet w in _wss)
+            foreach (KeyValuePair<string,Excel.Worksheet> pair in _wss)
             {
-                Marshal.ReleaseComObject(w);
+                Marshal.ReleaseComObject(pair.Value);
             }
 
             // nullify worksheet collection
+            _wss.Clear();
             _wss = null;
 
             // close workbook
