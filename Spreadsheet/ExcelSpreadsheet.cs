@@ -21,8 +21,8 @@ namespace NoSheet
 
         // data storage
         private Dictionary<Addr, string> _data = new Dictionary<Addr, string>();
-        private Dictionary<Addr, string> _formulas = new Dictionary<Addr, string>();
-        private Dictionary<Addr, Expr> _graph_roots = new Dictionary<Addr, Expr>();
+        private Dictionary<Addr, Expr> _formulas = new Dictionary<Addr, Expr>();
+        private Graph.DirectedAcyclicGraph _graph;
 
         // init dirty bits (key is A1 worksheet name)
         private Dictionary<string, bool> _dirty_sheets = new Dictionary<string, bool>();
@@ -66,6 +66,9 @@ namespace NoSheet
             // do initial reads
             FastReadAll(CellType.Data);
             FastReadAll(CellType.Formula);
+
+            // construct DAG
+            _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
         }
 
         private void TrackWorksheet(Excel.Worksheet w)
@@ -138,7 +141,7 @@ namespace NoSheet
             else if (!String.IsNullOrWhiteSpace(v2)
                      && fpatt.IsMatch(v2))
             {
-                InsertFormula(addr, v2);
+                InsertFormulaAsString(addr, v2);
             }
         }
 
@@ -220,24 +223,6 @@ namespace NoSheet
                                 XlCorruptLoad.RepairFile); // CorruptLoad (XlCorruptLoad enum)
 
             return _app.Workbooks[1];
-        }
-
-        private void ConstructDependenceGraph()
-        {
-            // storage for formula ASTs
-            var astd = new Dictionary<Addr, Expr>();
-
-            // parse every formula, associating each AST with an address
-            foreach (KeyValuePair<Addr, string> pair in _formulas)
-            {
-                var a = pair.Key;
-                var f = pair.Value;
-
-                astd.Add(a, ExcelParserUtility.ParseFormulaWithAddress(f, a));
-            }
-
-            // flatten into abstract syntax DAG
-            
         }
 
         private Excel.Range GetCOMCell(Addr address)
@@ -341,12 +326,26 @@ namespace NoSheet
 
         public void InsertFormulaAsString(Addr address, string formula)
         {
-            throw new NotImplementedException();
+            // parse formula
+            var pf = ExcelParserUtility.ParseFormulaWithAddress(formula, address);
+
+            // insert
+            if (_formulas.ContainsKey(address))
+            {
+                _formulas[address] = pf;
+            }
+            else
+            {
+                _formulas.Add(address, pf);
+            }
         }
 
         public string GetFormulaAsString(Addr address)
         {
-            throw new NotImplementedException();
+            // TODO: this should actually use an Excel-specific
+            //       visitor, since SpreadsheetAST is supposed
+            //       to be a spreadsheet-agnostic IR
+            return _formulas[address].ToString();
         }
 
         public bool IsFormula(Addr address)
