@@ -7,6 +7,8 @@ using Microsoft.FSharp.Core;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Linq;
+using Addr = SpreadsheetAST.Address;
+using Expr = SpreadsheetAST.Expression;
 
 namespace NoSheet
 {
@@ -18,9 +20,9 @@ namespace NoSheet
         private Dictionary<string, Excel.Worksheet> _wss = new Dictionary<string, Excel.Worksheet>();
 
         // data storage
-        private Dictionary<SpreadsheetAST.Address, string> _data = new Dictionary<SpreadsheetAST.Address, string>();
-        private Dictionary<SpreadsheetAST.Address, string> _formulas = new Dictionary<SpreadsheetAST.Address, string>();
-        private Dictionary<SpreadsheetAST.Address, SpreadsheetAST.Expression> _graph_roots = new Dictionary<SpreadsheetAST.Address, SpreadsheetAST.Expression>();
+        private Dictionary<Addr, string> _data = new Dictionary<Addr, string>();
+        private Dictionary<Addr, string> _formulas = new Dictionary<Addr, string>();
+        private Dictionary<Addr, Expr> _graph_roots = new Dictionary<Addr, Expr>();
 
         // init dirty bits (key is A1 worksheet name)
         private Dictionary<string, bool> _dirty_sheets = new Dictionary<string, bool>();
@@ -95,7 +97,7 @@ namespace NoSheet
                     if (buf2d[i, j] != null)
                     {
                         // calculate address
-                        var addr = SpreadsheetAST.Address.NewFromR1C1(i + y_del, j + x_del, wsname, wbname, wbpath);
+                        var addr = Addr.NewFromR1C1(i + y_del, j + x_del, wsname, wbname, wbpath);
 
                         // data case
                         if (celltype == CellType.Data)
@@ -106,7 +108,7 @@ namespace NoSheet
                         else if (!String.IsNullOrWhiteSpace((String)buf2d[i, j])
                                  && fpatt.IsMatch((String)buf2d[i, j]))
                         {
-                            InsertFormula(addr, System.Convert.ToString(buf2d[i, j]));
+                            InsertFormulaAsString(addr, System.Convert.ToString(buf2d[i, j]));
                         }
                     }
                 }
@@ -122,7 +124,7 @@ namespace NoSheet
                                 FSharpOption<string> wbpath)
         {
             // calculate address
-            var addr = SpreadsheetAST.Address.NewFromR1C1(top, left, wsname, wbname, wbpath);
+            var addr = Addr.NewFromR1C1(top, left, wsname, wbname, wbpath);
 
             // value2
             var v2 = System.Convert.ToString(cell.Value2);
@@ -223,10 +225,10 @@ namespace NoSheet
         private void ConstructDependenceGraph()
         {
             // storage for formula ASTs
-            var astd = new Dictionary<SpreadsheetAST.Address, SpreadsheetAST.Expression>();
+            var astd = new Dictionary<Addr, Expr>();
 
             // parse every formula, associating each AST with an address
-            foreach (KeyValuePair<SpreadsheetAST.Address, string> pair in _formulas)
+            foreach (KeyValuePair<Addr, string> pair in _formulas)
             {
                 var a = pair.Key;
                 var f = pair.Value;
@@ -238,7 +240,7 @@ namespace NoSheet
             
         }
 
-        private Excel.Range GetCOMCell(SpreadsheetAST.Address address)
+        private Excel.Range GetCOMCell(Addr address)
         {
             var cell_ws = address.A1Worksheet();
             return _wss[cell_ws].get_Range(address.A1Local());
@@ -249,7 +251,7 @@ namespace NoSheet
             return _wss[range.GetWorksheetName()].get_Range(range.TopLeftAddress(), range.BottomRightAddress());
         }
 
-        private static SpreadsheetAST.Address AddressFromCOMObject(Excel.Range com, Excel.Workbook wb) {
+        private static Addr AddressFromCOMObject(Excel.Range com, Excel.Workbook wb) {
             var wsname = com.Worksheet.Name;
             var wbname = wb.Name;
             var path = System.IO.Path.GetDirectoryName(wb.FullName);
@@ -258,7 +260,7 @@ namespace NoSheet
                                        Excel.XlReferenceStyle.xlR1C1,
                                        Type.Missing,
                                        Type.Missing);
-             return SpreadsheetAST.Address.FromString(addr,
+             return Addr.FromString(addr,
                                            FSharpOption<string>.Some(wsname),
                                            FSharpOption<string>.Some(wbname),
                                            FSharpOption<string>.Some(path));
@@ -294,7 +296,7 @@ namespace NoSheet
             GC.Collect();
         }
 
-        public void InsertValue(SpreadsheetAST.Address address, string value)
+        public void InsertValue(Addr address, string value)
         {
             // insert into local storage
             if (_data.ContainsKey(address))
@@ -310,7 +312,7 @@ namespace NoSheet
             _dirty_sheets[address.A1Worksheet()] = true;
         }
 
-        public string GetValue(SpreadsheetAST.Address address)
+        public string GetValue(Addr address)
         {
             if (_dirty_sheets.ContainsValue(true))
             {
@@ -327,25 +329,27 @@ namespace NoSheet
             }
         }
 
-        public void InsertFormula(SpreadsheetAST.Address address, string formula)
+        public void InsertFormula(Addr address, Expr formula)
         {
             throw new NotImplementedException();
         }
 
-        public string GetFormula(SpreadsheetAST.Address address)
+        public Expr GetFormula(Addr address)
         {
-            string formula;
-            if (_formulas.TryGetValue(address, out formula))
-            {
-                return formula;
-            }
-            else
-            {
-                return String.Empty;
-            }
+            throw new NotImplementedException();
         }
 
-        public bool IsFormula(SpreadsheetAST.Address address)
+        public void InsertFormulaAsString(Addr address, string formula)
+        {
+            throw new NotImplementedException();
+        }
+
+        public string GetFormulaAsString(Addr address)
+        {
+            throw new NotImplementedException();
+        }
+
+        public bool IsFormula(Addr address)
         {
             return _formulas.ContainsKey(address);
         }

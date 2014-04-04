@@ -1,4 +1,4 @@
-﻿module SpreadsheetAST
+﻿namespace SpreadsheetAST
     open System
     open System.Diagnostics
 
