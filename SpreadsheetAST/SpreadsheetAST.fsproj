@@ -42,6 +42,7 @@
   <ItemGroup>
     <Compile Include="AST.fs" />
     <Compile Include="Utility.fs" />
+    <Compile Include="Graph.fs" />
   </ItemGroup>
   <PropertyGroup>
     <MinimumVisualStudioVersion Condition="'$(MinimumVisualStudioVersion)' == ''">11</MinimumVisualStudioVersion>

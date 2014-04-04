@@ -73,6 +73,13 @@
         member self.WorkbookName
             with get() = _wbn
             and set(value) = _wbn <- value
+        // a Cantor pairing function for X and Y coordinates
+        member private self.CantorPair : int =
+            // adjust x and y to zero-based indexing
+            let x = self.X - 1
+            let y = self.Y - 1
+            // calc
+            ((x + y)*(x + y + 1))/2 + y
         member self.AddressAsInt32() =
             // convert to zero-based indices
             // the modulus catches overflow; collisions are OK because our equality
@@ -131,6 +138,10 @@
                 ltr.ToString()
             else
                 Address.IntToColChars(quot) + ltr.ToString()
+        interface IComparable with
+            member self.CompareTo(obj: Object) : int =
+                let addr = obj :?> Address
+                self.A1FullyQualified().CompareTo(addr.A1FullyQualified())
 
     and IndirectAddress(expr: string) =
         inherit Address()
@@ -150,6 +161,16 @@
         member self.getYBottom() : int = _br.Y
         member self.TopLeftAddress() : Address = _tl
         member self.BottomRightAddress() : Address = _br
+        member self.GetAddresses() : Set<Address> =
+            seq {
+                for x in [_tl.X .. _br.X] do
+                    for y in [_tl.Y .. _br.Y] do
+                        yield Address.NewFromR1C1(y, x, _tl.WorksheetName, _tl.WorkbookName, _tl.Path)
+            } |> Set.ofSeq
+        member self.A1FullyQualified() : string =
+            let wsname = _tl.A1Worksheet()
+            let wbname = _tl.A1Workbook()
+            "[" + wbname + "]" + wsname + "!" + _tl.A1Local() + ":" + _br.A1Local()
         member self.InsideRange(rng: Range) : bool =
             not (self.getXLeft() < rng.getXLeft() ||
                  self.getYTop() < rng.getYTop() ||
@@ -187,6 +208,10 @@
             self.getXRight() = r.getXRight() &&
             self.getYTop() = r.getYTop() &&
             self.getYBottom() = r.getYBottom()
+        interface IComparable with
+            member self.CompareTo(obj: Object) : int =
+                let rng = obj :?> Range
+                self.A1FullyQualified().CompareTo(rng.A1FullyQualified())
 
     type ReferenceType =
     | ReferenceAddress  = 0
