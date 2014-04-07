@@ -202,6 +202,8 @@
             [_tl.WorkbookName; _br.WorkbookName] |> List.choose id |> List.toSeq
         member self.GetPathNames() : seq<string> =
             [_tl.Path; _br.Path] |> List.choose id |> List.toSeq
+        member self.Width : int = self.getXRight() - self.getXLeft()
+        member self.Height : int = self.getYBottom() - self.getYTop()
         override self.Equals(obj: obj) : bool =
             let r = obj :?> Range
             self.getXLeft() = r.getXLeft() &&

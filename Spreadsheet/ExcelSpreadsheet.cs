@@ -12,6 +12,11 @@ using Expr = SpreadsheetAST.Expression;
 
 namespace NoSheet
 {
+    public class InvalidRangeException : Exception
+    {
+        public InvalidRangeException(string message) : base(message) { }
+    }
+
     public class ExcelSpreadsheet : ISpreadsheet, IDisposable
     {
         // COM handles
@@ -25,7 +30,8 @@ namespace NoSheet
         private Graph.DirectedAcyclicGraph _graph;
 
         // init dirty bits (key is A1 worksheet name)
-        private Dictionary<string, bool> _dirty_sheets = new Dictionary<string, bool>();
+        private Dictionary<string, bool> _needs_write = new Dictionary<string, bool>();
+        private Dictionary<string, bool> _needs_read = new Dictionary<string, bool>();
 
         // formula string regex
         private Regex fpatt = new Regex("^=", RegexOptions.Compiled);
@@ -64,8 +70,8 @@ namespace NoSheet
             _wb = OpenWorkbook(filename);
 
             // do initial reads
-            FastReadAll(CellType.Data);
-            FastReadAll(CellType.Formula);
+            FastRead(CellType.Data);
+            FastRead(CellType.Formula);
 
             // construct DAG
             _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
@@ -76,7 +82,7 @@ namespace NoSheet
             if (!_wss.ContainsKey(w.Name))
             {
                 _wss.Add(w.Name, w);
-                _dirty_sheets.Add(w.Name, true);
+                _needs_read.Add(w.Name, true);
             }
         }
 
@@ -102,10 +108,20 @@ namespace NoSheet
                         // calculate address
                         var addr = Addr.NewFromR1C1(i + y_del, j + x_del, wsname, wbname, wbpath);
 
+                        // read value
+                        var v = System.Convert.ToString(buf2d[i, j]);
+
                         // data case
                         if (celltype == CellType.Data)
                         {
-                            InsertValue(addr, System.Convert.ToString(buf2d[i, j]));
+                            if (String.IsNullOrEmpty(v))
+                            {
+                                InsertValue(addr, String.Empty);
+                            }
+                            else
+                            {
+                                InsertValue(addr, v);
+                            }
                         }
                         // formula case
                         else if (!String.IsNullOrWhiteSpace((String)buf2d[i, j])
@@ -135,7 +151,14 @@ namespace NoSheet
             // data case
             if (celltype == CellType.Data)
             {
-                InsertValue(addr, v2);
+                if (String.IsNullOrEmpty(v2))
+                {
+                    InsertValue(addr, String.Empty);
+                }
+                else
+                {
+                    InsertValue(addr, v2);
+                }
             }
             // formula case
             else if (!String.IsNullOrWhiteSpace(v2)
@@ -145,7 +168,136 @@ namespace NoSheet
             }
         }
 
-        private void FastReadAll(CellType ct)
+        /// <summary>
+        /// Fluses all cached data with dirty worksheet bits to
+        /// the backing Excel file.  Unsets dirty write bits and
+        /// sets dirty read bits.
+        /// </summary>
+        private void FastWrite()
+        {
+            // worksheets with dirty write
+            var ds = _needs_write.Where(pair => pair.Value == true).Select(pair => pair.Key);
+
+            // changed input list
+            var changed_addrs = new List<Addr>();
+
+            foreach(string wsname in ds)
+            {
+                // filter dictionary to include only matching addresses
+                IEnumerable<KeyValuePair<Addr,string>> fdata = _data.Where(pair => pair.Key.A1Worksheet().Equals(wsname));
+
+                // collect addresses
+                IEnumerable<Addr> addrl = fdata.Select(pair => pair.Key);
+
+                // get used range
+                SpreadsheetAST.Range ur = GetRegion(addrl);
+
+                // calculate deltas to store in zero-based array
+                int x_del = -ur.getXLeft();
+                int y_del = -ur.getYTop();
+
+                // construct write object
+                // first coord is y
+                // second coord is x
+                string[,] output = new string[ur.Height, ur.Width];
+
+                // fill with data
+                foreach (KeyValuePair<Addr, string> pair in fdata)
+                {
+                    var addr = pair.Key;
+                    var value = pair.Value;
+
+                    // write
+                    output[addr.Y + y_del, addr.X + x_del] = value;
+
+                    // note changed address
+                    changed_addrs.Add(addr);
+                }
+
+                // get corresponding COM object
+                Excel.Range rng = GetCOMRange(ur);
+
+                // write to COM object
+                rng.Value2 = output;
+
+                // unset dirty write bit
+                _needs_write[wsname] = false;
+
+                // set dirty read bit
+                _needs_read[wsname] = true;
+            }
+
+            // ensure that dirty read bit is set for all
+            // outputs of the inputs just written
+            foreach (Addr a in changed_addrs)
+            {
+                foreach (Addr faddr in _graph.GetOutputDependencies(a))
+                {
+                    _needs_read[faddr.A1Worksheet()] = true;
+                }
+            }
+        }
+
+        private SpreadsheetAST.Range GetRegion(IEnumerable<Addr> addresses)
+        {
+            int leftmost = 0;
+            int rightmost = 0;
+            int topmost = 0;
+            int bottommost = 0;
+
+            FSharpOption<string> wsname = FSharpOption<string>.None;
+            FSharpOption<string> wbname = FSharpOption<string>.None;
+            FSharpOption<string> wbpath = FSharpOption<string>.None;
+
+            foreach (Addr a in addresses)
+            {
+                if (FSharpOption<string>.get_IsNone(wsname))
+                {
+                    wsname = a.WorksheetName;
+                }
+                else if (!wsname.Equals(a.WorksheetName))
+                {
+                    throw new InvalidRangeException(
+                        String.Format(
+                            "Range contains references to worksheets \"{0}\" and \"{1}\"",
+                            wsname.Value,
+                            a.WorksheetName.Value
+                        )
+                    );
+                }
+
+                if (a.X < leftmost)
+                {
+                    leftmost = a.X;
+                }
+                if (a.X > rightmost)
+                {
+                    rightmost = a.X;
+                }
+                if (a.Y < topmost)
+                {
+                    topmost = a.Y;
+                }
+                if (a.Y > bottommost)
+                {
+                    bottommost = a.Y;
+                }
+            }
+
+            // get topleft and bottomright address
+            Addr tl = Addr.NewFromR1C1(topmost, leftmost, wsname, wbname, wbpath);
+            Addr br = Addr.NewFromR1C1(bottommost, rightmost, wsname, wbname, wbpath);
+
+            // return corresponding range
+            return new SpreadsheetAST.Range(tl, br);
+        }
+
+        /// <summary>
+        /// Reads all values whose worksheets have dirty read bits set to true,
+        /// or all values if worksheet has never been read.  Unsets dirty read bits.
+        /// </summary>
+        /// <param name="ct"></param>
+        private void FastRead(CellType ct)
         {
             var wbpath_o = FSharpOption<string>.Some(Path.GetDirectoryName(_wb.FullName));
             var wbname_o = FSharpOption<string>.Some(_wb.Name);
@@ -155,20 +307,24 @@ namespace NoSheet
                 // keep track of this worksheet
                 TrackWorksheet(ws);
 
+                // get worksheet name
+                var wsname = ws.Name;
+                var wsname_o = FSharpOption<string>.Some(wsname);
+
                 // only read sheet if dirty bit is set
                 // the above call to TrackWorksheet will
                 // init the dirty bit to true
-                if (!_dirty_sheets[ws.Name]) { continue; }
+                if (!_needs_read[wsname]) { continue; }
 
                 // get used range
                 Excel.Range ur = ws.UsedRange;
 
                 // sometimes the used range is null
-                if (ur.Value2 != null) { continue; }
-
-                // get worksheet name
-                var wsname = ws.Name;
-                var wsname_o = FSharpOption<string>.Some(wsname);
+                if (ur.Value2 != null) {
+                    // unset dirty bit then continue
+                    _needs_read[wsname] = false;
+                    continue;
+                }
 
                 // calculate offsets
                 var left = ur.Column;
@@ -191,8 +347,8 @@ namespace NoSheet
                     __CellRead(ct, ur, left, top, wsname_o, wbname_o, wbpath_o);
                 }
 
-                // unset dirty bit
-                _dirty_sheets[wsname] = false;
+                // unset needs read bit
+                _needs_read[wsname] = false;
             }
         }
 
@@ -286,22 +442,40 @@ namespace NoSheet
             // insert into local storage
             if (_data.ContainsKey(address))
             {
-                _data[address] = value;
+                // if the string is null or empty,
+                // remove from the dict because
+                // the default value to return when
+                // the key is not in the dictionary
+                // is the empty string
+                if (String.IsNullOrEmpty(value))
+                {
+                    _data.Remove(address);
+                }
+                // don't bother updating if the values
+                // are the same
+                else if (_data[address].Equals(value))
+                {
+                    // return without setting dirty write bit
+                    return;
+                } else {
+                    _data[address] = value;
+                }
             }
             else
             {
                 _data.Add(address, value);
             }
 
-            // set dirty bit for worksheet
-            _dirty_sheets[address.A1Worksheet()] = true;
+            // set dirty write bit for worksheet
+            _needs_write[address.A1Worksheet()] = true;
         }
 
         public string GetValue(Addr address)
         {
-            if (_dirty_sheets.ContainsValue(true))
+            if (_needs_write.ContainsValue(true))
             {
-                FastReadAll(CellType.Data);
+                FastWrite();
+                FastRead(CellType.Data);
             }
             string value;
             if (_data.TryGetValue(address, out value))
@@ -351,6 +525,15 @@ namespace NoSheet
         public bool IsFormula(Addr address)
         {
             return _formulas.ContainsKey(address);
+        }
+
+        public Dictionary<Addr, string> GetAllValues()
+        {
+            return _data;
+        }
+        public Dictionary<Addr, Expr> GetAllFormulas()
+        {
+            return _formulas;
         }
     }
 
