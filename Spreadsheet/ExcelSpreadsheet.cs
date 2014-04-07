@@ -31,7 +31,9 @@ namespace NoSheet
 
         // init dirty bits (key is A1 worksheet name)
         private Dictionary<string, bool> _needs_write = new Dictionary<string, bool>();
-        private Dictionary<string, bool> _needs_read = new Dictionary<string, bool>();
+        private Dictionary<string, bool> _needs_data_read = new Dictionary<string, bool>();
+        private Dictionary<string, bool> _needs_formula_read = new Dictionary<string, bool>();
+        // TODO: At the moment, there is no support for writing formulas
 
         // formula string regex
         private Regex fpatt = new Regex("^=", RegexOptions.Compiled);
@@ -77,12 +79,25 @@ namespace NoSheet
             _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
         }
 
+        /// <summary>
+        /// Register COM worksheet name and dirty bits. The dirty read bit
+        /// is initialized to true since the worksheet needs to be read
+        /// and the dirty write bit is initialized to false since nothing
+        /// should be read just yet.
+        /// </summary>
+        /// <param name="w"></param>
         private void TrackWorksheet(Excel.Worksheet w)
         {
             if (!_wss.ContainsKey(w.Name))
             {
+                // TODO we should force a recalculation before the first read
+                // since Excel will otherwise use its own cached values, which
+                // may be invalid with respect to the current Excel app version's
+                // interpreter semantics.
                 _wss.Add(w.Name, w);
-                _needs_read.Add(w.Name, true);
+                _needs_data_read.Add(w.Name, true);
+                _needs_formula_read.Add(w.Name, true);
+                _needs_write.Add(w.Name, false);
             }
         }
 
@@ -94,14 +109,19 @@ namespace NoSheet
                                  FSharpOption<string> wbname,
                                  FSharpOption<string> wbpath)
         {
+            // do fast read
             // y is the first index
             // x is the second index
-            object[,] buf2d = usedrange.Value2; // do read
+            object[,] buf2d = celltype == CellType.Data ? usedrange.Value2 : usedrange.Formula;
+
+            // calculate height and width once
+            int height = buf2d.GetLength(0);
+            int width = buf2d.GetLength(1);
 
             // copy cells in data to Cell objects
-            for (int i = 1; i <= buf2d.GetLength(0); i++)
+            for (int i = 1; i <= height; i++)
             {
-                for (int j = 1; j <= buf2d.GetLength(1); j++)
+                for (int j = 1; j <= width; j++)
                 {
                     if (buf2d[i, j] != null)
                     {
@@ -114,20 +134,15 @@ namespace NoSheet
                         // data case
                         if (celltype == CellType.Data)
                         {
-                            if (String.IsNullOrEmpty(v))
-                            {
-                                InsertValue(addr, String.Empty);
-                            }
-                            else
-                            {
-                                InsertValue(addr, v);
-                            }
+                            // note that we ignore write signal
+                            // on fast read since we only read
+                            // on initial open and after writes
+                            CacheValue(addr, v);
                         }
                         // formula case
-                        else if (!String.IsNullOrWhiteSpace((String)buf2d[i, j])
-                                 && fpatt.IsMatch((String)buf2d[i, j]))
+                        else
                         {
-                            InsertFormulaAsString(addr, System.Convert.ToString(buf2d[i, j]));
+                            CacheFormula(addr, System.Convert.ToString(buf2d[i, j]));
                         }
                     }
                 }
@@ -151,20 +166,14 @@ namespace NoSheet
             // data case
             if (celltype == CellType.Data)
             {
-                if (String.IsNullOrEmpty(v2))
-                {
-                    InsertValue(addr, String.Empty);
-                }
-                else
-                {
-                    InsertValue(addr, v2);
-                }
+                // note that we ignore write signal
+                // when doing a fast read
+                CacheValue(addr, v2);
             }
             // formula case
-            else if (!String.IsNullOrWhiteSpace(v2)
-                     && fpatt.IsMatch(v2))
+            else
             {
-                InsertFormulaAsString(addr, v2);
+                CacheFormula(addr, v2);
             }
         }
 
@@ -175,6 +184,11 @@ namespace NoSheet
         /// </summary>
         private void FastWrite()
         {
+            if (_needs_write.Where(pair => pair.Value == true).Count() == 0)
+            {
+                return;
+            }
+
             // worksheets with dirty write
             var ds = _needs_write.Where(pair => pair.Value == true).Select(pair => pair.Key);
 
@@ -224,7 +238,7 @@ namespace NoSheet
                 _needs_write[wsname] = false;
 
                 // set dirty read bit
-                _needs_read[wsname] = true;
+                _needs_data_read[wsname] = true;
             }
 
             // ensure that dirty read bit is set for all
@@ -233,7 +247,7 @@ namespace NoSheet
             {
                 foreach (Addr faddr in _graph.GetOutputDependencies(a))
                 {
-                    _needs_read[faddr.A1Worksheet()] = true;
+                    _needs_data_read[faddr.A1Worksheet()] = true;
                 }
             }
         }
@@ -299,6 +313,9 @@ namespace NoSheet
         /// <param name="ct"></param>
         private void FastRead(CellType ct)
         {
+            // always start by flushing pending writes
+            FastWrite();
+
             var wbpath_o = FSharpOption<string>.Some(Path.GetDirectoryName(_wb.FullName));
             var wbname_o = FSharpOption<string>.Some(_wb.Name);
 
@@ -313,18 +330,18 @@ namespace NoSheet
 
                 // only read sheet if dirty bit is set
                 // the above call to TrackWorksheet will
-                // init the dirty bit to true
-                if (!_needs_read[wsname]) { continue; }
+                // init the dirty bit to true on inital read
+                if (ct == CellType.Data)
+                {
+                    if (!_needs_data_read[wsname]) { continue; }
+                }
+                else
+                {
+                    if (!_needs_formula_read[wsname]) { continue; }
+                }
 
                 // get used range
                 Excel.Range ur = ws.UsedRange;
-
-                // sometimes the used range is null
-                if (ur.Value2 != null) {
-                    // unset dirty bit then continue
-                    _needs_read[wsname] = false;
-                    continue;
-                }
 
                 // calculate offsets
                 var left = ur.Column;
@@ -348,7 +365,14 @@ namespace NoSheet
                 }
 
                 // unset needs read bit
-                _needs_read[wsname] = false;
+                if (ct == CellType.Data)
+                {
+                    _needs_data_read[wsname] = false;
+                }
+                else
+                {
+                    _needs_formula_read[wsname] = false;
+                }
             }
         }
 
@@ -437,7 +461,13 @@ namespace NoSheet
             GC.Collect();
         }
 
-        public void InsertValue(Addr address, string value)
+        /// <summary>
+        /// Caches the value. Returns true to signal that the backing
+        /// spreadsheet should be marked as dirty.
+        /// </summary>
+        /// <param name="address"></param>
+        /// <param name="value"></param>
+        private bool CacheValue(Addr address, string value)
         {
             // insert into local storage
             if (_data.ContainsKey(address))
@@ -455,19 +485,35 @@ namespace NoSheet
                 // are the same
                 else if (_data[address].Equals(value))
                 {
-                    // return without setting dirty write bit
-                    return;
+                    // return without signaling write
+                    return false;
                 } else {
                     _data[address] = value;
                 }
             }
             else
             {
-                _data.Add(address, value);
+                // only add if not null or empty
+                if (String.IsNullOrEmpty(value))
+                {
+                    // return without signaling write
+                    return false;
+                }
+                else
+                {
+                    _data.Add(address, value);
+                }
             }
 
-            // set dirty write bit for worksheet
-            _needs_write[address.A1Worksheet()] = true;
+            return true;
+        }
+
+        public void InsertValue(Addr address, string value)
+        {
+            if (CacheValue(address, value))
+            {
+                _needs_write[address.A1Worksheet()] = true;
+            }
         }
 
         public string GetValue(Addr address)
@@ -488,29 +534,28 @@ namespace NoSheet
             }
         }
 
-        public void InsertFormula(Addr address, Expr formula)
-        {
-            throw new NotImplementedException();
-        }
-
         public Expr GetFormula(Addr address)
         {
-            throw new NotImplementedException();
+            return _formulas[address];
         }
 
-        public void InsertFormulaAsString(Addr address, string formula)
+        private void CacheFormula(Addr address, string formula)
         {
-            // parse formula
-            var pf = ExcelParserUtility.ParseFormulaWithAddress(formula, address);
+            if (!String.IsNullOrWhiteSpace(formula)
+                && fpatt.IsMatch(formula))
+            {
+                // parse formula
+                var pf = ExcelParserUtility.ParseFormulaWithAddress(formula, address);
 
-            // insert
-            if (_formulas.ContainsKey(address))
-            {
-                _formulas[address] = pf;
-            }
-            else
-            {
-                _formulas.Add(address, pf);
+                // insert
+                if (_formulas.ContainsKey(address))
+                {
+                    _formulas[address] = pf;
+                }
+                else
+                {
+                    _formulas.Add(address, pf);
+                }
             }
         }
 
