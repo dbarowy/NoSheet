@@ -79,6 +79,11 @@ namespace NoSheet
             _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
         }
 
+        public int GetProcessID()
+        {
+            return ExcelSingleton.ProcessID;
+        }
+
         /// <summary>
         /// Register COM worksheet name and dirty bits. The dirty read bit
         /// is initialized to true since the worksheet needs to be read
@@ -589,6 +594,10 @@ namespace NoSheet
 
     public class ExcelSingleton
     {
+        // P/Invoke call to get PID
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern int GetWindowThreadProcessId(HandleRef handle, out int processId);
+
         private static Excel.Application _instance;
         private ExcelSingleton() { }
         public static Excel.Application Instance
@@ -602,6 +611,21 @@ namespace NoSheet
                 return _instance;
             }
         }
+        public static int ProcessID
+        {
+            get
+            {
+                // force singleton startup
+                var i = ExcelSingleton.Instance;
+
+                // get PID
+                HandleRef hwnd = new HandleRef(_instance, (IntPtr)_instance.Hwnd);
+                int pid;
+                GetWindowThreadProcessId(hwnd, out pid);
+                return pid;
+            }
+        }
+
 
         ~ExcelSingleton()
         {
