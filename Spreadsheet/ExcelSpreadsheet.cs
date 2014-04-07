@@ -90,10 +90,6 @@ namespace NoSheet
         {
             if (!_wss.ContainsKey(w.Name))
             {
-                // TODO we should force a recalculation before the first read
-                // since Excel will otherwise use its own cached values, which
-                // may be invalid with respect to the current Excel app version's
-                // interpreter semantics.
                 _wss.Add(w.Name, w);
                 _needs_data_read.Add(w.Name, true);
                 _needs_formula_read.Add(w.Name, true);
@@ -315,6 +311,15 @@ namespace NoSheet
         {
             // always start by flushing pending writes
             FastWrite();
+
+            // We force a recalculation before the first read
+            // since Excel will otherwise use its own cached values, which
+            // may be invalid with respect to the current Excel app version's
+            // interpreter semantics.
+            if (_needs_data_read.Count() == 0)
+            {
+                _app.CalculateFullRebuild();
+            }
 
             var wbpath_o = FSharpOption<string>.Some(Path.GetDirectoryName(_wb.FullName));
             var wbname_o = FSharpOption<string>.Some(_wb.Name);
