@@ -10,13 +10,16 @@ using System.Linq;
 using Addr = SpreadsheetAST.Address;
 using Expr = SpreadsheetAST.Expression;
 
+// Make all internal methods in this assembly visible to test code
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("NoSheetTests")]
+
 namespace NoSheet
 {
     public class InvalidRangeException : Exception
     {
         public InvalidRangeException(string message) : base(message) { }
     }
-
+    
     public class ExcelSpreadsheet : ISpreadsheet, IDisposable
     {
         // COM handles
@@ -65,6 +68,68 @@ namespace NoSheet
             Formula
         }
 
+        public enum FileFormat
+        {
+            AddIn = Excel.XlFileFormat.xlAddIn,
+            AddIn8 = Excel.XlFileFormat.xlAddIn8,
+            CSV = Excel.XlFileFormat.xlCSV,
+            CSV_Mac = Excel.XlFileFormat.xlCSVMac,
+            CSV_MSDOS = Excel.XlFileFormat.xlCSVMSDOS,
+            CSV_Windows = Excel.XlFileFormat.xlCSVWindows,
+            CurrentPlatformText = Excel.XlFileFormat.xlCurrentPlatformText,
+            DBF2 = Excel.XlFileFormat.xlDBF2,
+            DBF3 = Excel.XlFileFormat.xlDBF3,
+            DBF4 = Excel.XlFileFormat.xlDBF4,
+            DIF = Excel.XlFileFormat.xlDIF,
+            Excel12 = Excel.XlFileFormat.xlExcel12,
+            Excel2 = Excel.XlFileFormat.xlExcel2,
+            Excel2FarEast = Excel.XlFileFormat.xlExcel2FarEast,
+            Excel3 = Excel.XlFileFormat.xlExcel3,
+            Excel4 = Excel.XlFileFormat.xlExcel4,
+            Excel4Workbook = Excel.XlFileFormat.xlExcel4Workbook,
+            Excel5 = Excel.XlFileFormat.xlExcel5,
+            Excel7 = Excel.XlFileFormat.xlExcel7,
+            Excel8 = Excel.XlFileFormat.xlExcel8,
+            Excel9795 = Excel.XlFileFormat.xlExcel9795,
+            HTML = Excel.XlFileFormat.xlHtml,
+            IntlAddIn = Excel.XlFileFormat.xlIntlAddIn,
+            IntlMacro = Excel.XlFileFormat.xlIntlMacro,
+            OpenDocumentSpreadsheet = Excel.XlFileFormat.xlOpenDocumentSpreadsheet,
+            OpenXMLAddIn = Excel.XlFileFormat.xlOpenXMLAddIn,
+            OpenXMLTemplate = Excel.XlFileFormat.xlOpenXMLTemplate,
+            OpenXMLTemplaceMacroEnabled = Excel.XlFileFormat.xlOpenXMLTemplateMacroEnabled,
+            OpenXMLWorkbook = Excel.XlFileFormat.xlOpenXMLWorkbook,
+            OpenXMLWorkbookMacroEnabled = Excel.XlFileFormat.xlOpenXMLWorkbookMacroEnabled,
+            SYLK = Excel.XlFileFormat.xlSYLK,
+            Template = Excel.XlFileFormat.xlTemplate,
+            Template8 = Excel.XlFileFormat.xlTemplate8,
+            TextMac = Excel.XlFileFormat.xlTextMac,
+            TextMSDOS = Excel.XlFileFormat.xlTextMSDOS,
+            TextPrinter = Excel.XlFileFormat.xlTextPrinter,
+            TextWindows = Excel.XlFileFormat.xlTextWindows,
+            UnicodeText = Excel.XlFileFormat.xlUnicodeText,
+            WebArchive = Excel.XlFileFormat.xlWebArchive,
+            WJ2WD1 = Excel.XlFileFormat.xlWJ2WD1,
+            WJ3 = Excel.XlFileFormat.xlWJ3,
+            WJ3FJ3 = Excel.XlFileFormat.xlWJ3FJ3,
+            WK1 = Excel.XlFileFormat.xlWK1,
+            WK1ALL = Excel.XlFileFormat.xlWK1ALL,
+            WK1FMT = Excel.XlFileFormat.xlWK1FMT,
+            WK3 = Excel.XlFileFormat.xlWK3,
+            WK3FM3 = Excel.XlFileFormat.xlWK3FM3,
+            WK4 = Excel.XlFileFormat.xlWK4,
+            WKS = Excel.XlFileFormat.xlWKS,
+            WorkbookDefault = Excel.XlFileFormat.xlWorkbookDefault,
+            WorkbookNormal = Excel.XlFileFormat.xlWorkbookNormal,
+            Works2FarEast = Excel.XlFileFormat.xlWorks2FarEast,
+            WQ1 = Excel.XlFileFormat.xlWQ1,
+            XMLSpreadsheet = Excel.XlFileFormat.xlXMLSpreadsheet
+        }
+
+        /// <summary>
+        /// Initializes an ExcelSpreadsheet, starting up an Excel instance if necessary.
+        /// </summary>
+        /// <param name="filename"></param>
         public ExcelSpreadsheet(string filename)
         {
             // init Excel resources
@@ -79,7 +144,11 @@ namespace NoSheet
             _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
         }
 
-        public int GetProcessID()
+        /// <summary>
+        /// Returns the PID of the singleton Excel Application instance.
+        /// </summary>
+        /// <returns></returns>
+        internal int GetProcessID()
         {
             return ExcelSingleton.ProcessID;
         }
@@ -90,7 +159,7 @@ namespace NoSheet
         /// and the dirty write bit is initialized to false since nothing
         /// should be read just yet.
         /// </summary>
-        /// <param name="w"></param>
+        /// <param name="w">Reference to an Excel COM Worksheet object.</param>
         private void TrackWorksheet(Excel.Worksheet w)
         {
             if (!_wss.ContainsKey(w.Name))
@@ -388,6 +457,11 @@ namespace NoSheet
 
         private Excel.Workbook OpenWorkbook(string filename)
         {
+            if (!File.Exists(filename))
+            {
+                throw new FileNotFoundException(filename);
+            }
+
             // we need to disable all alerts, e.g., password prompts, etc.
             _app.DisplayAlerts = false;
 
@@ -518,7 +592,7 @@ namespace NoSheet
             return true;
         }
 
-        public void InsertValue(Addr address, string value)
+        public void SetValueAt(Addr address, string value)
         {
             if (CacheValue(address, value))
             {
@@ -526,7 +600,7 @@ namespace NoSheet
             }
         }
 
-        public string GetValue(Addr address)
+        public string ValueAt(Addr address)
         {
             if (_needs_write.ContainsValue(true))
             {
@@ -544,7 +618,7 @@ namespace NoSheet
             }
         }
 
-        public Expr GetFormula(Addr address)
+        public Expr FormulaAt(Addr address)
         {
             return _formulas[address];
         }
@@ -569,7 +643,7 @@ namespace NoSheet
             }
         }
 
-        public string GetFormulaAsString(Addr address)
+        public string FormulaAsStringAt(Addr address)
         {
             // TODO: this should actually use an Excel-specific
             //       visitor, since SpreadsheetAST is supposed
@@ -577,18 +651,109 @@ namespace NoSheet
             return _formulas[address].ToString();
         }
 
-        public bool IsFormula(Addr address)
+        public bool IsFormulaAt(Addr address)
         {
             return _formulas.ContainsKey(address);
         }
 
-        public Dictionary<Addr, string> GetAllValues()
+        public Dictionary<Addr, string> Values
         {
-            return _data;
+            get { return _data; }
         }
-        public Dictionary<Addr, Expr> GetAllFormulas()
+
+        public Dictionary<Addr, Expr> Formulas
         {
-            return _formulas;
+            get { return _formulas; }
+        }
+
+        internal bool HasPendingWrite()
+        {
+            return _needs_write.Select(pair => pair.Value == true).Count() > 0;
+        }
+
+        internal bool HasPendingDataRead()
+        {
+            return _needs_data_read.Select(pair => pair.Value == true).Count() > 0;
+        }
+
+        internal bool HasPendingFormulaRead()
+        {
+            return _needs_formula_read.Select(pair => pair.Value == true).Count() > 0;
+        }
+
+        /// <summary>
+        /// Save changes to the backing file.
+        /// </summary>
+        public void Save()
+        {
+            _wb.Save();
+        }
+
+        /// <summary>
+        /// Save the file with a different filename. If the
+        /// file already exists, SaveAs returns false and saves nothing.
+        /// </summary>
+        /// <param name="filename"></param>
+        /// <returns></returns>
+        public bool SaveAs(string filename)
+        {
+            return SaveAs(filename, FileFormat.WorkbookDefault);
+        }
+
+        /// <summary>
+        /// Save the file with a different filename and/or file format. If the
+        /// file already exists, SaveAs returns false and saves nothing.
+        /// </summary>
+        /// <param name="filename"></param>
+        /// <param name="fileformat"></param>
+        /// <returns></returns>
+        public bool SaveAs(string filename, FileFormat fileformat)
+        {
+            if (File.Exists(filename))
+            {
+                return false;
+            }
+
+            _wb.SaveAs(filename,                                            // filename
+                       fileformat,                                          // FileFormat enum
+                       Type.Missing,                                        // password
+                       Type.Missing,                                        // write reservation password
+                       false,                                               // readonly recommended
+                       false,                                               // create backup
+                       Excel.XlSaveAsAccessMode.xlExclusive,                // access mode
+                       Excel.XlSaveConflictResolution.xlLocalSessionChanges,// conflict resolution policy
+                       false,                                               // add to MRU list
+                       Type.Missing,                                        // codepage (ignored)
+                       Type.Missing,                                        // visual layout (ignored)
+                       true                                                 // true == "Excel language"; false == "VBA language"
+                      );
+
+            return true;
+        }
+
+        /// <summary>
+        /// Returns an array of the worksheets contained in the spreadsheet.
+        /// </summary>
+        /// <returns></returns>
+        public string[] WorksheetNames
+        {
+            get { return _wss.Select(pair => pair.Key).ToArray(); }
+        }
+        
+        /// <summary>
+        /// Returns the name of the workbook represented by this spreadsheet.
+        /// </summary>
+        public string WorkbookName
+        {
+            get { return _wb.Name; }
+        }
+
+        /// <summary>
+        /// Returns the directory of the current spreadsheet file.
+        /// </summary>
+        public string Directory
+        {
+            get { return Path.GetDirectoryName(_wb.FullName); }
         }
     }
 

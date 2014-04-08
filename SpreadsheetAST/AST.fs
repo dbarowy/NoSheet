@@ -11,14 +11,14 @@
         let mutable C: int = 0
         let mutable _wsn = None
         let mutable _wbn = None
-        let mutable _path = None
+        let mutable _path = None        // this should actually be the enclosing directory!
         static member FromR1C1(R: int, C: int, wsname: string, wbname: string, path: string) : Address =
             let addr = Address()
             addr.Row <- R
             addr.Col <- C
             addr.WorksheetName <- Some(wsname)
             addr.WorkbookName <- Some(wbname)
-            addr.Path <- Some(System.IO.Path.GetDirectoryName(path))
+            addr.Path <- Some(path)
             addr
         static member NewFromR1C1(R: int, C: int, wsname: string option, wbname: string option, path: string option) : Address =
             let addr = Address()
@@ -26,7 +26,7 @@
             addr.Col <- C
             addr.WorksheetName <- wsname
             addr.WorkbookName <- wbname
-            addr.Path <- match path with | Some(p) -> Some(System.IO.Path.GetDirectoryName(p)) | None -> None
+            addr.Path <- path
             addr
         static member NewFromA1(row: int, col: string, wsname: string option, wbname: string option, path: string option) : Address =
             let addr = Address()
@@ -34,7 +34,7 @@
             addr.Col <- Address.CharColToInt(col)
             addr.WorksheetName <- wsname
             addr.WorkbookName <- wbname
-            addr.Path <- match path with | Some(p) -> Some(System.IO.Path.GetDirectoryName(p)) | None -> None
+            addr.Path <- path
             addr
         member self.A1Local() : string = Address.IntToColChars(self.X) + self.Y.ToString()
         member self.A1Path() : string =

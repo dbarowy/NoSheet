@@ -1,17 +1,24 @@
 ﻿using System.Collections.Generic;
+using SpreadsheetAST;
 
 namespace NoSheet
 {
     public interface ISpreadsheet
     {
-        SpreadsheetAST.Expression GetFormula(SpreadsheetAST.Address address);
-        Dictionary<SpreadsheetAST.Address, string> GetAllValues();
-        Dictionary<SpreadsheetAST.Address, SpreadsheetAST.Expression> GetAllFormulas();
-        string GetFormulaAsString(SpreadsheetAST.Address address);
-        string GetValue(SpreadsheetAST.Address address);
-        //void InsertFormula(SpreadsheetAST.Address address, SpreadsheetAST.Expression ast);
-        //void InsertFormulaAsString(SpreadsheetAST.Address address, string formula);
-        void InsertValue(SpreadsheetAST.Address address, string value);
-        bool IsFormula(SpreadsheetAST.Address address);
-    }    
+        // Properties
+        string                          Directory { get; }
+        Dictionary<Address, Expression> Formulas { get; }
+        Dictionary<Address, string>     Values { get; }
+        string                          WorkbookName { get; }
+        string[]                        WorksheetNames { get; }
+
+        // Methods
+        string      FormulaAsStringAt(Address address);
+        Expression  FormulaAt(Address address);
+        bool        IsFormulaAt(Address address);
+        void        Save();
+        bool        SaveAs(string filename);
+        void        SetValueAt(Address address, string value);
+        string      ValueAt(Address address);
+    }
 }
