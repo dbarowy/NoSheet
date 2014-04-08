@@ -88,25 +88,40 @@ namespace NoSheetTests
                 // save with new name
                 ss.SaveAs(newfilename);
 
-                // we want to modify the value at Sheet1!A1
-                var addr = Address.FromR1C1(1, 1, "Sheet1", ss.WorkbookName, ss.Directory);
+                // some addresses
+                var addr_a1 = Address.FromR1C1(1, 1, "Sheet1", ss.WorkbookName, ss.Directory);
+                var addr_b1 = Address.FromR1C1(1, 2, "Sheet1", ss.WorkbookName, ss.Directory);
+                var addr_c1 = Address.FromR1C1(1, 3, "Sheet1", ss.WorkbookName, ss.Directory);
 
                 // get the value in Sheet1!A1
-                var a1_orig = ss.ValueAt(addr);
+                var a1_orig = ss.ValueAt(addr_a1);
+
+                // get the values of the function outputs at Sheet1!B1 and Sheet1!C1
+                var b1_orig = ss.ValueAt(addr_b1);
+                var c1_orig = ss.ValueAt(addr_c1);
+
+                // the new value
+                var newval = System.Convert.ToString(System.Convert.ToDouble(a1_orig) + 1);
 
                 // change the value
-                ss.SetValueAt(addr, System.Convert.ToString(System.Convert.ToDouble(a1_orig) + 1));
-
-                // the spreadsheet should now require a write to the backing store
-
+                ss.SetValueAt(addr_a1, newval);
 
                 // get the value again
-                var a1_new = ss.ValueAt(addr);
+                var a1_new = ss.ValueAt(addr_a1);
+
+                // get the new function outputs
+                var b1_new = ss.ValueAt(addr_b1);
+                var c1_new = ss.ValueAt(addr_c1);
 
                 // the values should be different
                 Assert.AreNotEqual(a1_orig, a1_new);
 
-                // furthermore, the formulas should also be different
+                // specifically, a1_new should be the value we stuck in there
+                Assert.AreEqual(a1_new, newval);
+
+                // the formula outputs should also be different
+                Assert.AreNotEqual(b1_orig, b1_new);
+                Assert.AreNotEqual(c1_orig, c1_new);
             }
 
             // cleanup

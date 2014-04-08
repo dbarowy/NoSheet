@@ -30,10 +30,11 @@ namespace NoSheet
         // data storage
         private Dictionary<Addr, string> _data = new Dictionary<Addr, string>();
         private Dictionary<Addr, Expr> _formulas = new Dictionary<Addr, Expr>();
+        private Dictionary<Addr, string> _formula_strings = new Dictionary<Addr, string>();
         private Graph.DirectedAcyclicGraph _graph;
 
         // init dirty bits (key is A1 worksheet name)
-        private Dictionary<string, bool> _needs_write = new Dictionary<string, bool>();
+        private HashSet<Addr> _pending_writes = new HashSet<Addr>();
         private Dictionary<string, bool> _needs_data_read = new Dictionary<string, bool>();
         private Dictionary<string, bool> _needs_formula_read = new Dictionary<string, bool>();
         // TODO: At the moment, there is no support for writing formulas
@@ -162,7 +163,6 @@ namespace NoSheet
                 _wss.Add(w.Name, w);
                 _needs_data_read.Add(w.Name, true);
                 _needs_formula_read.Add(w.Name, true);
-                _needs_write.Add(w.Name, false);
             }
         }
 
@@ -243,42 +243,44 @@ namespace NoSheet
         }
 
         /// <summary>
-        /// Fluses all cached data with dirty worksheet bits to
+        /// Fluses all cached data marked as changed to
         /// the backing Excel file.  Unsets dirty write bits and
         /// sets dirty read bits.
         /// </summary>
         private void FastUpdate()
         {
-            if (_needs_write.Where(pair => pair.Value == true).Count() == 0)
+            if (_pending_writes.Count == 0)
             {
                 return;
             }
 
-            // worksheets with dirty write
-            var ds = _needs_write.Where(pair => pair.Value == true).Select(pair => pair.Key);
-
-            // changed input list
-            var changed_addrs = new List<Addr>();
-
-            foreach(string wsname in ds)
+            // iterate through the worksheets
+            foreach(KeyValuePair<string,Excel.Worksheet> kvp in _wss)
             {
+                var wsname = kvp.Key;
+
                 // filter dictionary to include only matching addresses
                 IEnumerable<KeyValuePair<Addr,string>> fdata = _data.Where(pair => pair.Key.A1Worksheet().Equals(wsname));
 
                 // collect addresses
                 IEnumerable<Addr> addrl = fdata.Select(pair => pair.Key);
 
-                // get used range
-                SpreadsheetAST.Range ur = GetRegion(addrl);
+                // move on if there are no applicable Addresses for this worksheet
+                if (addrl.Count() == 0) { continue; }
 
-                // calculate deltas to store in zero-based array
-                int x_del = -ur.getXLeft();
-                int y_del = -ur.getYTop();
+                // get the smallest region that includes all of our updates
+                SpreadsheetAST.Range region = GetRegion(addrl);
+                
+                // calculate deltas to adjust addresses
+                // fo region bounds
+                int x_del = region.getXLeft();
+                int y_del = region.getYTop();
 
-                // construct write object
-                // first coord is y
-                // second coord is x
-                string[,] output = new string[ur.Height, ur.Width];
+                // get corresponding COM object
+                Excel.Range rng = GetCOMRange(region);
+
+                // save all of the original values
+                object[,] data = rng.Value2;
 
                 // fill with data
                 foreach (KeyValuePair<Addr, string> pair in fdata)
@@ -286,21 +288,29 @@ namespace NoSheet
                     var addr = pair.Key;
                     var value = pair.Value;
 
-                    // write
-                    output[addr.Y + y_del, addr.X + x_del] = value;
+                    // calculate addresses for offset and
+                    // 1-based addressing
+                    var y = addr.Y - y_del + 1;
+                    var x = addr.X - x_del + 1;
 
-                    // note changed address
-                    changed_addrs.Add(addr);
+                    // update array
+                    data[y, x] = value;
                 }
 
-                // get corresponding COM object
-                Excel.Range rng = GetCOMRange(ur);
+                // write data to COM object
+                rng.Value2 = data;
 
-                // write to COM object
-                rng.Value2 = output;
+                // find formulas that we may have overwritten
+                var oform = _formula_strings.Where(pair => region.ContainsAddress(pair.Key));
 
-                // unset dirty write bit
-                _needs_write[wsname] = false;
+                // fix each one
+                foreach (KeyValuePair<Addr,string> fa in oform)
+                {
+                    var addr = fa.Key;
+                    var value = fa.Value;
+
+                    GetCOMCell(addr).Formula = value;
+                }
 
                 // set dirty read bit
                 _needs_data_read[wsname] = true;
@@ -308,21 +318,29 @@ namespace NoSheet
 
             // ensure that dirty read bit is set for all
             // outputs of the inputs just written
-            foreach (Addr a in changed_addrs)
+            foreach (Addr a in _pending_writes)
             {
                 foreach (Addr faddr in _graph.GetOutputDependencies(a))
                 {
                     _needs_data_read[faddr.A1Worksheet()] = true;
                 }
             }
+
+            // clear pending writes
+            _pending_writes.Clear();
         }
 
         private SpreadsheetAST.Range GetRegion(IEnumerable<Addr> addresses)
         {
-            int leftmost = 0;
-            int rightmost = 0;
-            int topmost = 0;
-            int bottommost = 0;
+            if (addresses.Count() == 0)
+            {
+                throw new Exception("IEnumerable must contain at least one Address.");
+            }
+
+            int leftmost = Int32.MaxValue;
+            int rightmost = Int32.MinValue;
+            int topmost = Int32.MaxValue;
+            int bottommost = Int32.MinValue;
 
             FSharpOption<string> wsname = FSharpOption<string>.None;
             FSharpOption<string> wbname = FSharpOption<string>.None;
@@ -498,7 +516,10 @@ namespace NoSheet
 
         private Excel.Range GetCOMRange(SpreadsheetAST.Range range)
         {
-            return _wss[range.GetWorksheetName()].get_Range(range.TopLeftAddress(), range.BottomRightAddress());
+            var tla = range.TopLeftAddress();
+            var bra = range.BottomRightAddress();
+
+            return _wss[range.GetWorksheetName()].get_Range(tla.A1Local(), bra.A1Local());
         }
 
         private static Addr AddressFromCOMObject(Excel.Range com, Excel.Workbook wb) {
@@ -595,9 +616,15 @@ namespace NoSheet
 
         public void SetValueAt(Addr address, string value)
         {
+            // we do not write to formula outputs
+            if (_formulas.ContainsKey(address))
+            {
+                throw new FormulaOverwriteException(address);
+            }
+
             if (CacheValue(address, value))
             {
-                _needs_write[address.A1Worksheet()] = true;
+                _pending_writes.Add(address);
             }
         }
 
@@ -639,10 +666,12 @@ namespace NoSheet
                 if (_formulas.ContainsKey(address))
                 {
                     _formulas[address] = pf;
+                    _formula_strings[address] = formula;
                 }
                 else
                 {
                     _formulas.Add(address, pf);
+                    _formula_strings.Add(address, formula);
                 }
             }
         }
@@ -684,7 +713,7 @@ namespace NoSheet
 
         internal bool HasPendingWrite()
         {
-            return _needs_write.Select(pair => pair.Value == true).Count() > 0;
+            return _pending_writes.Count > 0;
         }
 
         internal bool HasPendingDataRead()

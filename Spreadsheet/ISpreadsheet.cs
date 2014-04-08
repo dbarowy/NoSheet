@@ -1,8 +1,15 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using SpreadsheetAST;
 
 namespace NoSheet
 {
+    public class FormulaOverwriteException : Exception
+    {
+        public FormulaOverwriteException(Address address)
+            : base(String.Format("Can't overwrite formula output at {0}.", address.ToString())) { }
+    }
+
     public interface ISpreadsheet
     {
         // Properties

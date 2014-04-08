@@ -172,17 +172,35 @@
             let wbname = _tl.A1Workbook()
             "[" + wbname + "]" + wsname + "!" + _tl.A1Local() + ":" + _br.A1Local()
         member self.InsideRange(rng: Range) : bool =
-            not (self.getXLeft() < rng.getXLeft() ||
-                 self.getYTop() < rng.getYTop() ||
-                 self.getXRight() > rng.getXRight() ||
-                 self.getYBottom() > rng.getYBottom())
-        // Yup, weird case.  This is because we actually
-        // distinguish between addresses and ranges, unlike Excel.
+            if rng.TopLeftAddress().A1Path() <> self.TopLeftAddress().A1Path() ||
+               rng.TopLeftAddress().A1Workbook() <> self.TopLeftAddress().A1Workbook() ||
+               rng.TopLeftAddress().A1Worksheet() <> self.TopLeftAddress().A1Worksheet() then
+               false
+            else
+                not (self.getXLeft() < rng.getXLeft() ||
+                     self.getYTop() < rng.getYTop() ||
+                     self.getXRight() > rng.getXRight() ||
+                     self.getYBottom() > rng.getYBottom())
         member self.InsideAddr(addr: Address) : bool =
-            not (self.getXLeft() < addr.X ||
-                 self.getYTop() < addr.Y ||
-                 self.getXRight() > addr.X ||
-                 self.getYBottom() > addr.Y)
+            if addr.A1Path() <> self.TopLeftAddress().A1Path() ||
+               addr.A1Workbook() <> self.TopLeftAddress().A1Workbook() ||
+               addr.A1Worksheet() <> self.TopLeftAddress().A1Worksheet() then
+               false
+            else
+                not (self.getXLeft() < addr.X ||
+                     self.getYTop() < addr.Y ||
+                     self.getXRight() > addr.X ||
+                     self.getYBottom() > addr.Y)
+        member self.ContainsAddress(addr: Address) : bool =
+            if addr.A1Path() <> self.TopLeftAddress().A1Path() ||
+               addr.A1Workbook() <> self.TopLeftAddress().A1Workbook() ||
+               addr.A1Worksheet() <> self.TopLeftAddress().A1Worksheet() then
+               false
+            else
+                self.getXLeft() <= addr.X &&
+                self.getXRight() >= addr.X &&
+                self.getYTop() <= addr.Y &&
+                self.getYBottom() >= addr.Y
         member self.SetPathName(path: string option) : unit =
             _tl.Path <- path
             _br.Path <- path
@@ -202,8 +220,8 @@
             [_tl.WorkbookName; _br.WorkbookName] |> List.choose id |> List.toSeq
         member self.GetPathNames() : seq<string> =
             [_tl.Path; _br.Path] |> List.choose id |> List.toSeq
-        member self.Width : int = self.getXRight() - self.getXLeft()
-        member self.Height : int = self.getYBottom() - self.getYTop()
+        member self.Width : int = self.getXRight() - self.getXLeft() + 1
+        member self.Height : int = self.getYBottom() - self.getYTop() + 1
         override self.Equals(obj: obj) : bool =
             let r = obj :?> Range
             self.getXLeft() = r.getXLeft() &&
