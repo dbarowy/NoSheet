@@ -39,7 +39,7 @@ namespace NoSheet
         // TODO: At the moment, there is no support for writing formulas
 
         // formula string regex
-        private Regex fpatt = new Regex("^=", RegexOptions.Compiled);
+        private readonly Regex ISFORMULA = new Regex("^=", RegexOptions.Compiled);
 
         // All of the following private enums are poorly documented
         private enum XlCorruptLoad
@@ -128,6 +128,8 @@ namespace NoSheet
 
         /// <summary>
         /// Initializes an ExcelSpreadsheet, starting up an Excel instance if necessary.
+        /// ExcelSpreadsheet reads values from the backing store lazily, but when a request
+        /// is required, it reads all worksheets at once in order to amortize the cost.
         /// </summary>
         /// <param name="filename"></param>
         public ExcelSpreadsheet(string filename)
@@ -135,13 +137,6 @@ namespace NoSheet
             // init Excel resources
             _app = ExcelSingleton.Instance;
             _wb = OpenWorkbook(filename);
-
-            // do initial reads
-            FastRead(CellType.Data);
-            FastRead(CellType.Formula);
-
-            // construct DAG
-            _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
         }
 
         /// <summary>
@@ -252,7 +247,7 @@ namespace NoSheet
         /// the backing Excel file.  Unsets dirty write bits and
         /// sets dirty read bits.
         /// </summary>
-        private void FastWrite()
+        private void FastUpdate()
         {
             if (_needs_write.Where(pair => pair.Value == true).Count() == 0)
             {
@@ -384,7 +379,7 @@ namespace NoSheet
         private void FastRead(CellType ct)
         {
             // always start by flushing pending writes
-            FastWrite();
+            FastUpdate();
 
             // We force a recalculation before the first read
             // since Excel will otherwise use its own cached values, which
@@ -451,6 +446,12 @@ namespace NoSheet
                 else
                 {
                     _needs_formula_read[wsname] = false;
+                }
+
+                // if we just reread formulas, we need to rebuild the graph
+                if (ct == CellType.Formula)
+                {
+                    _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
                 }
             }
         }
@@ -602,11 +603,11 @@ namespace NoSheet
 
         public string ValueAt(Addr address)
         {
-            if (_needs_write.ContainsValue(true))
-            {
-                FastWrite();
-                FastRead(CellType.Data);
-            }
+            // lazy update
+            FastUpdate();
+            FastRead(CellType.Data);
+            FastRead(CellType.Formula);
+
             string value;
             if (_data.TryGetValue(address, out value))
             {
@@ -620,13 +621,18 @@ namespace NoSheet
 
         public Expr FormulaAt(Addr address)
         {
+            // lazy update
+            FastUpdate();
+            FastRead(CellType.Data);
+            FastRead(CellType.Formula);
+
             return _formulas[address];
         }
 
         private void CacheFormula(Addr address, string formula)
         {
             if (!String.IsNullOrWhiteSpace(formula)
-                && fpatt.IsMatch(formula))
+                && ISFORMULA.IsMatch(formula))
             {
                 // parse formula
                 var pf = ExcelParserUtility.ParseFormulaWithAddress(formula, address);
@@ -658,12 +664,26 @@ namespace NoSheet
 
         public Dictionary<Addr, string> Values
         {
-            get { return _data; }
+            get {
+                // lazy update
+                FastUpdate();
+                FastRead(CellType.Data);
+                FastRead(CellType.Formula); 
+                
+                return _data;
+            }
         }
 
         public Dictionary<Addr, Expr> Formulas
         {
-            get { return _formulas; }
+            get {
+                // lazy update
+                FastUpdate();
+                FastRead(CellType.Data);
+                FastRead(CellType.Formula);
+
+                return _formulas;
+            }
         }
 
         internal bool HasPendingWrite()
@@ -727,6 +747,11 @@ namespace NoSheet
                        Type.Missing,                                        // visual layout (ignored)
                        true                                                 // true == "Excel language"; false == "VBA language"
                       );
+
+            // when someone changes the name of the workbook, our data structures need to be updated
+            _needs_data_read.ToDictionary(pair => pair.Key, pair => true);
+            _needs_formula_read.ToDictionary(pair => pair.Key, pair => true);
+            _graph = null;
 
             return true;
         }
