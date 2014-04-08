@@ -604,7 +604,6 @@ namespace NoSheet
         public string ValueAt(Addr address)
         {
             // lazy update
-            FastUpdate();
             FastRead(CellType.Data);
             FastRead(CellType.Formula);
 
@@ -622,7 +621,6 @@ namespace NoSheet
         public Expr FormulaAt(Addr address)
         {
             // lazy update
-            FastUpdate();
             FastRead(CellType.Data);
             FastRead(CellType.Formula);
 
@@ -666,7 +664,6 @@ namespace NoSheet
         {
             get {
                 // lazy update
-                FastUpdate();
                 FastRead(CellType.Data);
                 FastRead(CellType.Formula); 
                 
@@ -678,7 +675,6 @@ namespace NoSheet
         {
             get {
                 // lazy update
-                FastUpdate();
                 FastRead(CellType.Data);
                 FastRead(CellType.Formula);
 
