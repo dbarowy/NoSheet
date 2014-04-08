@@ -257,59 +257,80 @@ namespace NoSheet
             // iterate through the worksheets
             foreach(KeyValuePair<string,Excel.Worksheet> kvp in _wss)
             {
-                var wsname = kvp.Key;
+                string wsname = kvp.Key;
+                Excel.Workbook wb = kvp.Value.Parent;
+                string wbname = wb.Name;
+                string wbpath = Path.GetDirectoryName(wb.FullName);
 
-                // filter dictionary to include only matching addresses
-                IEnumerable<KeyValuePair<Addr,string>> fdata = _data.Where(pair => pair.Key.A1Worksheet().Equals(wsname));
-
-                // collect addresses
-                IEnumerable<Addr> addrl = fdata.Select(pair => pair.Key);
+                // filter pending writes to include only addresses for this worksheet
+                var pw_filt =
+                    _pending_writes.Where(addr =>
+                        addr.A1Worksheet().Equals(wsname) &&
+                        addr.A1Workbook().Equals(wbname) &&
+                        addr.A1Path().Equals(wbpath)
+                    );
 
                 // move on if there are no applicable Addresses for this worksheet
-                if (addrl.Count() == 0) { continue; }
+                if (pw_filt.Count() == 0) { continue; }
 
-                // get the smallest region that includes all of our updates
-                SpreadsheetAST.Range region = GetRegion(addrl);
-                
-                // calculate deltas to adjust addresses
-                // fo region bounds
-                int x_del = region.getXLeft();
-                int y_del = region.getYTop();
-
-                // get corresponding COM object
-                Excel.Range rng = GetCOMRange(region);
-
-                // save all of the original values
-                object[,] data = rng.Value2;
-
-                // fill with data
-                foreach (KeyValuePair<Addr, string> pair in fdata)
+                // if the value is a singleton, then don't do a range
+                // write; Excel will throw a runtime exception
+                if (pw_filt.Count() == 1)
                 {
-                    var addr = pair.Key;
-                    var value = pair.Value;
+                    // get address
+                    var addr = pw_filt.First();
 
-                    // calculate addresses for offset and
-                    // 1-based addressing
-                    var y = addr.Y - y_del + 1;
-                    var x = addr.X - x_del + 1;
+                    // get COM object
+                    Excel.Range cell = GetCOMCell(addr);
 
-                    // update array
-                    data[y, x] = value;
+                    // write value
+                    cell.Value2 = _data[addr];
                 }
-
-                // write data to COM object
-                rng.Value2 = data;
-
-                // find formulas that we may have overwritten
-                var oform = _formula_strings.Where(pair => region.ContainsAddress(pair.Key));
-
-                // fix each one
-                foreach (KeyValuePair<Addr,string> fa in oform)
+                // otherwise do range write
+                else
                 {
-                    var addr = fa.Key;
-                    var value = fa.Value;
+                    // get the smallest region that includes all of our updates
+                    SpreadsheetAST.Range region = GetRegion(pw_filt);
 
-                    GetCOMCell(addr).Formula = value;
+                    // calculate deltas to adjust addresses
+                    // fo region bounds
+                    int x_del = region.getXLeft();
+                    int y_del = region.getYTop();
+
+                    // get corresponding COM object
+                    Excel.Range rng = GetCOMRange(region);
+
+                    // save all of the original values
+                    object[,] data = rng.Value2;
+
+                    // fill with data
+                    foreach (Addr addr in pw_filt)
+                    {
+                        var value = _data[addr];
+
+                        // calculate addresses for offset and
+                        // 1-based addressing
+                        var y = addr.Y - y_del + 1;
+                        var x = addr.X - x_del + 1;
+
+                        // update array
+                        data[y, x] = value;
+                    }
+
+                    // write data to COM object
+                    rng.Value2 = data;
+
+                    // find formulas that we may have overwritten
+                    var oform = _formula_strings.Where(pair => region.ContainsAddress(pair.Key));
+
+                    // fix each one
+                    foreach (KeyValuePair<Addr, string> fa in oform)
+                    {
+                        var addr = fa.Key;
+                        var value = fa.Value;
+
+                        GetCOMCell(addr).Formula = value;
+                    }
                 }
 
                 // set dirty read bit
@@ -317,7 +338,8 @@ namespace NoSheet
             }
 
             // ensure that dirty read bit is set for all
-            // outputs of the inputs just written
+            // worksheets containing the outputs
+            // of the inputs just written
             foreach (Addr a in _pending_writes)
             {
                 foreach (Addr faddr in _graph.GetOutputDependencies(a))
@@ -342,9 +364,9 @@ namespace NoSheet
             int topmost = Int32.MaxValue;
             int bottommost = Int32.MinValue;
 
-            FSharpOption<string> wsname = FSharpOption<string>.None;
-            FSharpOption<string> wbname = FSharpOption<string>.None;
-            FSharpOption<string> wbpath = FSharpOption<string>.None;
+            FSharpOption<string> wsname = addresses.First().WorksheetName;
+            FSharpOption<string> wbname = addresses.First().WorkbookName;
+            FSharpOption<string> wbpath = addresses.First().Path;
 
             foreach (Addr a in addresses)
             {
