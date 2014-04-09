@@ -11,6 +11,7 @@ namespace NoSheetTests
     public class BasicIOTests
     {
         public const string SIMPLE_WB = "SimpleWorkbook.xlsx";
+        public const string INTERLEAVED_WB = "Interleaved.xlsx";
 
         // Note that testing that IDisposable objects do the right
         // thing is not really feasible because 1) GC is nondeterministic,
@@ -240,7 +241,88 @@ namespace NoSheetTests
         [TestMethod]
         public void InterleavedFunctionValueWrite()
         {
-            // TODO
+            // get test file path
+            string filename = ResourceLoader.GetResourcePath(INTERLEAVED_WB);
+
+            // make a copy of the file to the following path
+            string newfilename = Path.Combine(Path.GetDirectoryName(filename),
+                                              Path.GetFileNameWithoutExtension(filename) +
+                                              "_itest.xlsx");
+
+            // ensure that the file doesn't already exist
+            Assert.IsFalse(File.Exists(newfilename));
+
+            // load spreadsheet
+            using (var ss = new ExcelSpreadsheet(filename))
+            {
+                // save with new name
+                ss.SaveAs(newfilename);
+
+                // some value addresses
+                var addr_a1 = Address.FromR1C1(1, 1, "Sheet1", ss.WorkbookName, ss.Directory);
+                var addr_c4= Address.FromR1C1(3, 4, "Sheet1", ss.WorkbookName, ss.Directory);
+
+                // some function addresses
+                var addr_b1 = Address.FromR1C1(1, 2, "Sheet1", ss.WorkbookName, ss.Directory);
+                var addr_c1 = Address.FromR1C1(1, 3, "Sheet1", ss.WorkbookName, ss.Directory);
+
+                // grab formula strings from B1 and C1
+                var form_b1_1 = ss.FormulaAsStringAt(addr_b1);
+                var form_c1_1 = ss.FormulaAsStringAt(addr_c1);
+
+                // grab initial values from B1 and C1
+                var data_b1_1 = ss.ValueAt(addr_b1);
+                var data_c1_1 = ss.ValueAt(addr_c1);
+
+                // update A1 and C4; this should cause a range write
+                // the next time we read
+                ss.SetValueAt(addr_a1, "1000");
+                ss.SetValueAt(addr_c4, "1000");
+
+                // read the formula strings again
+                var form_b1_2 = ss.FormulaAsStringAt(addr_b1);
+                var form_c1_2 = ss.FormulaAsStringAt(addr_c1);
+
+                // read values from B1 and C1 again
+                var data_b1_2 = ss.ValueAt(addr_b1);
+                var data_c1_2 = ss.ValueAt(addr_c1);
+
+                // are the formula strings the same?
+                Assert.AreEqual(form_b1_1, form_b1_2);
+                Assert.AreEqual(form_c1_1, form_c1_2);
+
+                // are the computed values correct?
+                Assert.AreNotEqual(data_b1_1, data_b1_2);
+                Assert.AreEqual("1009", data_b1_2);
+                Assert.AreNotEqual(data_c1_1, data_c1_2);
+                Assert.AreEqual("1027", data_c1_2);
+            }
+
+            // cleanup
+            File.Delete(newfilename);
+        }
+
+        [TestMethod]
+        public void ExcelAddressCorrectness()
+        {
+            // get test file path
+            string filename = ResourceLoader.GetResourcePath(SIMPLE_WB);
+
+            // load spreadsheet
+            using (var ss = new ExcelSpreadsheet(filename))
+            {
+                // get address
+                var addr_a1 = Address.FromR1C1(1, 1, "Sheet1", ss.WorkbookName, ss.Directory);
+                
+                // get fully-qualified spreadsheet address
+                var a1fq = addr_a1.A1FullyQualified();
+
+                // the correct string
+                var correct = "[" + filename + "]Sheet1!A1";
+
+                // the strings should be the same
+                Assert.AreEqual(correct, a1fq);
+            }
         }
     }
 }

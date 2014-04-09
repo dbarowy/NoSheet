@@ -7,7 +7,13 @@ namespace NoSheet
     public class FormulaOverwriteException : Exception
     {
         public FormulaOverwriteException(Address address)
-            : base(String.Format("Can't overwrite formula output at {0}.", address.ToString())) { }
+            : base(String.Format("Can't overwrite formula output at {0}.", address.A1FullyQualified())) { }
+    }
+
+    public class IsNotFormulaException : Exception
+    {
+        public IsNotFormulaException(Address address)
+            : base(String.Format("Can't get formula for non-formula cell at {0}.", address.A1FullyQualified())) { }
     }
 
     public interface ISpreadsheet

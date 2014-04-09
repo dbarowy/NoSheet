@@ -530,18 +530,23 @@ namespace NoSheet
             return _app.Workbooks[1];
         }
 
-        private Excel.Range GetCOMCell(Addr address)
+        internal Excel.Range GetCOMCell(Addr address)
         {
             var cell_ws = address.A1Worksheet();
             return _wss[cell_ws].get_Range(address.A1Local());
         }
 
-        private Excel.Range GetCOMRange(SpreadsheetAST.Range range)
+        internal Excel.Range GetCOMRange(SpreadsheetAST.Range range)
         {
             var tla = range.TopLeftAddress();
             var bra = range.BottomRightAddress();
 
             return _wss[range.GetWorksheetName()].get_Range(tla.A1Local(), bra.A1Local());
+        }
+
+        internal Excel.Workbook GetCOMWorkbook()
+        {
+            return _wb;
         }
 
         private static Addr AddressFromCOMObject(Excel.Range com, Excel.Workbook wb) {
@@ -673,7 +678,15 @@ namespace NoSheet
             FastRead(CellType.Data);
             FastRead(CellType.Formula);
 
-            return _formulas[address];
+            Expr f;
+            if (_formulas.TryGetValue(address, out f))
+            {
+                return f;
+            }
+            else
+            {
+                throw new IsNotFormulaException(address);
+            }
         }
 
         private void CacheFormula(Addr address, string formula)
@@ -700,14 +713,30 @@ namespace NoSheet
 
         public string FormulaAsStringAt(Addr address)
         {
+            // lazy update
+            FastRead(CellType.Data);
+            FastRead(CellType.Formula); 
+
             // TODO: this should actually use an Excel-specific
             //       visitor, since SpreadsheetAST is supposed
             //       to be a spreadsheet-agnostic IR
-            return _formulas[address].ToString();
+            string f;
+            if (_formula_strings.TryGetValue(address, out f))
+            {
+                return f;
+            }
+            else
+            {
+                throw new IsNotFormulaException(address);
+            }
         }
 
         public bool IsFormulaAt(Addr address)
         {
+            // lazy update
+            FastRead(CellType.Data);
+            FastRead(CellType.Formula); 
+
             return _formulas.ContainsKey(address);
         }
 

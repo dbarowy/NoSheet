@@ -50,7 +50,7 @@
             | Some(wb) -> wb
             | None -> failwith "Workbook string should never be unset."
         member self.A1FullyQualified() : string =
-            "[" + self.A1Workbook() + "]" + self.A1Worksheet() + "!" + self.A1Local()
+            "[" + IO.Path.Combine(self.A1Path(), self.A1Workbook()) + "]" + self.A1Worksheet() + "!" + self.A1Local()
         member self.R1C1 =
             let wsstr = match _wsn with | Some(ws) -> ws + "!" | None -> ""
             let wbstr = match _wbn with | Some(wb) -> "[" + wb + "]" | None -> ""

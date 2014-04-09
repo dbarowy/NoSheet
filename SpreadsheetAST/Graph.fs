@@ -46,7 +46,9 @@
         // this returns all output formulas that depend on a particular input
         // note that this computes the transitive closure of the "is output for" relation
         member self.GetOutputDependencies(input_address: Address) : Set<Address> =
-            cell_outputs.[input_address]
+            match cell_outputs.TryFind input_address with
+            | Some(addrs) -> addrs
+            | None -> Set.empty
 
         // this returns only the ranges that are referenced directly in this formula
         // note: used for classic DataDebug algorithm
