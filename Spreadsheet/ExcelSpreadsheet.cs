@@ -229,12 +229,12 @@ namespace NoSheet
                             // note that we ignore write signal
                             // on fast read since we only read
                             // on initial open and after writes
-                            CacheValue(addr, v);
+                            __CacheValue(addr, v);
                         }
                         // formula case
                         else
                         {
-                            CacheFormula(addr, System.Convert.ToString(buf2d[i, j]));
+                            __CacheFormula(addr, System.Convert.ToString(buf2d[i, j]));
                         }
                     }
                 }
@@ -271,12 +271,12 @@ namespace NoSheet
             {
                 // note that we ignore write signal
                 // when doing a fast read
-                CacheValue(addr, v2);
+                __CacheValue(addr, v2);
             }
             // formula case
             else
             {
-                CacheFormula(addr, v2);
+                __CacheFormula(addr, v2);
             }
         }
 
@@ -349,7 +349,7 @@ namespace NoSheet
         /// Flushes all cached data marked as changed to
         /// the backing Excel file.  Unsets dirty write bits and
         /// sets dirty read bits. This method should only ever
-        /// be called by FastRead().
+        /// be called by FastRead(). Thread-safe.
         /// </summary>
         private void FastUpdate()
         {
@@ -423,6 +423,11 @@ namespace NoSheet
             }
         }
 
+        /// <summary>
+        /// Returns a Region given a collection of Addresses. Thread-safe.
+        /// </summary>
+        /// <param name="addresses"></param>
+        /// <returns></returns>
         private static SpreadsheetAST.Range GetRegion(IEnumerable<Addr> addresses)
         {
             if (addresses.Count() == 0)
@@ -485,6 +490,7 @@ namespace NoSheet
         /// <summary>
         /// Reads all values whose worksheets have dirty read bits set to true,
         /// or all values if worksheet has never been read.  Unsets dirty read bits.
+        /// Thread-safe.
         /// </summary>
         /// <param name="ct"></param>
         private void FastRead(CellType ct)
@@ -501,18 +507,23 @@ namespace NoSheet
             if (!_lock.TryEnterWriteLock(0)) { return; }
             try
             {
-                // We force a recalculation before the first read
-                // since Excel will otherwise use its own cached values, which
-                // may be invalid with respect to the current Excel app version's
-                // interpreter semantics.
+                // If this is the first read, force a full Excel recalculation to ensure
+                // that no stale values are used.
                 if (_needs_data_read.Count() == 0)
                 {
                     _app.CalculateFullRebuild();
                 }
-
                 // bail out if no data needs to be reread;
                 // lock release handled by finally
-                if (_needs_data_read.Select(pair => pair.Value == true).Count() == 0)
+                else if (ct == CellType.Data
+                        && _needs_data_read.Select(pair => pair.Value == true).Count() == 0)
+                {
+                        return;
+                }
+                // bail out if no formulas need to be reread;
+                // lock release handled by finally
+                else if (ct == CellType.Formula
+                         && _needs_formula_read.Select(pair => pair.Value == true).Count() == 0)
                 {
                     return;
                 }
@@ -588,6 +599,13 @@ namespace NoSheet
             }
         }
 
+        /// <summary>
+        /// For internal use only.  Opens an Excel Workbook given a path string
+        /// and returns a COM Interop Excel.Workbook handle.  Not thread-safe.
+        /// Should only be called by the ExcelSpreadsheet constructor.
+        /// </summary>
+        /// <param name="filename"></param>
+        /// <returns></returns>
         private Excel.Workbook OpenWorkbook(string filename)
         {
             if (!File.Exists(filename))
@@ -648,6 +666,12 @@ namespace NoSheet
             return _wss[range.GetWorksheetName()].get_Range(tla.A1Local(), bra.A1Local());
         }
 
+        /// <summary>
+        /// For internal use only.  Returns the Address for a given COM object. Thread-safe.
+        /// </summary>
+        /// <param name="com"></param>
+        /// <param name="wb"></param>
+        /// <returns></returns>
         private static Addr AddressFromCOMObject(Excel.Range com, Excel.Workbook wb) {
             var wsname = com.Worksheet.Name;
             var wbname = wb.Name;
@@ -664,12 +688,13 @@ namespace NoSheet
         }
 
         /// <summary>
-        /// Caches the value. Returns true to signal that the backing
-        /// spreadsheet should be marked as dirty.
+        /// Internal use only.  Parses a formula and caches the expression
+        /// tree.  Should only ever be called by __ArrayRead or __CellRead.
+        /// Not thread-safe!
         /// </summary>
         /// <param name="address"></param>
         /// <param name="value"></param>
-        private bool CacheValue(Addr address, string value)
+        private bool __CacheValue(Addr address, string value)
         {
             // insert into local storage
             if (_data.ContainsKey(address))
@@ -712,15 +737,31 @@ namespace NoSheet
 
         public void SetValueAt(Addr address, string value)
         {
-            // we do not write to formula outputs
-            if (_formulas.ContainsKey(address))
+            // if a dependency graph has never been built,
+            // now is the time to do so.
+            if (_graph == null)
             {
-                throw new FormulaOverwriteException(address);
+                FastRead(CellType.Formula);
             }
 
-            if (CacheValue(address, value))
+            // Blocks until it is our turn to write.
+            _lock.EnterWriteLock();
+            try
             {
-                _pending_writes.Add(address);
+                // we do not write to formula outputs
+                if (_formulas.ContainsKey(address))
+                {
+                    throw new FormulaOverwriteException(address);
+                }
+
+                if (__CacheValue(address, value))
+                {
+                    _pending_writes.Add(address);
+                }
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
             }
         }
 
@@ -728,37 +769,58 @@ namespace NoSheet
         {
             // lazy update
             FastRead(CellType.Data);
-            FastRead(CellType.Formula);
 
-            string value;
-            if (_data.TryGetValue(address, out value))
+            _lock.EnterReadLock();
+            try
             {
-                return value;
+                string value;
+                if (_data.TryGetValue(address, out value))
+                {
+                    return value;
+                }
+                else
+                {
+                    return String.Empty;
+                }
             }
-            else
+            finally
             {
-                return String.Empty;
+                _lock.ExitReadLock();
             }
         }
 
         public Expr FormulaAt(Addr address)
         {
             // lazy update
-            FastRead(CellType.Data);
             FastRead(CellType.Formula);
 
-            Expr f;
-            if (_formulas.TryGetValue(address, out f))
+            _lock.EnterReadLock();
+            try
             {
-                return f;
+                Expr f;
+                if (_formulas.TryGetValue(address, out f))
+                {
+                    return f;
+                }
+                else
+                {
+                    throw new IsNotFormulaException(address);
+                }
             }
-            else
+            finally
             {
-                throw new IsNotFormulaException(address);
+                _lock.ExitReadLock();
             }
         }
 
-        private void CacheFormula(Addr address, string formula)
+        /// <summary>
+        /// Internal use only.  Parses a formula and caches the expression
+        /// tree.  Should only ever be called by __ArrayRead or __CellRead.
+        /// Not thread-safe!
+        /// </summary>
+        /// <param name="address"></param>
+        /// <param name="formula"></param>
+        private void __CacheFormula(Addr address, string formula)
         {
             if (!String.IsNullOrWhiteSpace(formula)
                 && ISFORMULA.IsMatch(formula))
@@ -783,30 +845,44 @@ namespace NoSheet
         public string FormulaAsStringAt(Addr address)
         {
             // lazy update
-            FastRead(CellType.Data);
             FastRead(CellType.Formula); 
 
             // TODO: this should actually use an Excel-specific
             //       visitor, since SpreadsheetAST is supposed
             //       to be a spreadsheet-agnostic IR
-            string f;
-            if (_formula_strings.TryGetValue(address, out f))
+            _lock.EnterReadLock();
+            try
             {
-                return f;
+                string f;
+                if (_formula_strings.TryGetValue(address, out f))
+                {
+                    return f;
+                }
+                else
+                {
+                    throw new IsNotFormulaException(address);
+                }
             }
-            else
+            finally
             {
-                throw new IsNotFormulaException(address);
+                _lock.ExitReadLock();
             }
         }
 
         public bool IsFormulaAt(Addr address)
         {
             // lazy update
-            FastRead(CellType.Data);
-            FastRead(CellType.Formula); 
+            FastRead(CellType.Formula);
 
-            return _formulas.ContainsKey(address);
+            _lock.EnterReadLock();
+            try
+            {
+                return _formulas.ContainsKey(address);
+            }
+            finally
+            {
+                _lock.ExitReadLock();
+            }
         }
 
         public Dictionary<Addr, string> Values
@@ -814,9 +890,16 @@ namespace NoSheet
             get {
                 // lazy update
                 FastRead(CellType.Data);
-                FastRead(CellType.Formula); 
-                
-                return _data;
+
+                _lock.EnterReadLock();
+                try
+                {
+                    return _data;
+                }
+                finally
+                {
+                    _lock.ExitReadLock();
+                }
             }
         }
 
@@ -826,7 +909,15 @@ namespace NoSheet
                 // lazy update
                 FastRead(CellType.Formula);
 
-                return _formulas;
+                _lock.EnterReadLock();
+                try
+                {
+                    return _formulas;
+                }
+                finally
+                {
+                    _lock.ExitReadLock();
+                }
             }
         }
 
