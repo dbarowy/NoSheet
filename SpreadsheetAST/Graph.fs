@@ -6,10 +6,11 @@
         let fs = Seq.map (fun (pair: KeyValuePair<Address,Expression>) -> (pair.Key, pair.Value)) formulas |> Map.ofSeq
         let ds = Seq.map (fun (pair: KeyValuePair<Address,string>) -> (pair.Key, pair.Value)) data |> Map.ofSeq
 
+        // the addresses of all formulas in the graph
         let formula_addresses = Map.toSeq fs |> Seq.map (fun (addr,_) -> addr) |> Set.ofSeq
 
-        // these are all of the input addresses for a formula output
-        // note that some inputs are data and others are formulas
+        // a map of the input addresses for a formula output (i.e., Addr -> Set<Addr>)
+        // note that some input addresses represent data and others represent formulas
         let formula_inputs =
             Map.map (fun addr expr ->
                 let ranges = SpreadsheetUtility.GetRangesFromExpr(expr)
@@ -59,6 +60,13 @@
             else
                 formula_addresses
 
+        // this method returns a set of homogenous inputs (a set of inputs)
+        // for the computation
         member self.HomogeneousInputs : Set<Set<Address>> =
-            
-            failwith "nope"
+            // for now, we do what the old CheckCell did: just
+            // return input ranges
+            Seq.map (fun (addr: Address) ->
+                Seq.map (fun (r: Range) ->
+                    r.GetAddresses()
+                ) (SpreadsheetUtility.GetRangesFromExpr(fs.[addr]))
+            ) formula_addresses |> Set.ofSeq
