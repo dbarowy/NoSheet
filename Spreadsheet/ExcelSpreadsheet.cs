@@ -7,6 +7,7 @@ using Microsoft.FSharp.Core;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Linq;
+using System.Threading;
 using Addr = SpreadsheetAST.Address;
 using Expr = SpreadsheetAST.Expression;
 
@@ -22,6 +23,12 @@ namespace NoSheet
     
     public class ExcelSpreadsheet : ISpreadsheet, IDisposable
     {
+        // reader-writer lock object
+        private ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
+
+        // interlock for safe disposal
+        private int _disposed = 0;
+
         // COM handles
         private Excel.Application _app;
         private Excel.Workbook _wb;
@@ -41,6 +48,10 @@ namespace NoSheet
 
         // formula string regex
         private readonly Regex ISFORMULA = new Regex("^=", RegexOptions.Compiled);
+
+        // names
+        private string _workbook_directory;
+        private string _workbook_name;
 
         // All of the following private enums are poorly documented
         private enum XlCorruptLoad
@@ -128,7 +139,7 @@ namespace NoSheet
         }
 
         /// <summary>
-        /// Initializes an ExcelSpreadsheet, starting up an Excel instance if necessary.
+        /// Constructor. Initializes an ExcelSpreadsheet, starting up an Excel instance if necessary.
         /// ExcelSpreadsheet reads values from the backing store lazily, but when a request
         /// is required, it reads all worksheets at once in order to amortize the cost.
         /// </summary>
@@ -138,6 +149,10 @@ namespace NoSheet
             // init Excel resources
             _app = ExcelSingleton.Instance;
             _wb = OpenWorkbook(filename);
+
+            // grab names, which only change when we call Save As.
+            _workbook_directory = Path.GetDirectoryName(_wb.FullName);
+            _workbook_name = _wb.Name;
         }
 
         /// <summary>
@@ -150,10 +165,11 @@ namespace NoSheet
         }
 
         /// <summary>
-        /// Register COM worksheet name and dirty bits. The dirty read bit
+        /// Internal use only. Not thread-safe. Register COM worksheet name
+        /// and dirty bits. The dirty read bit
         /// is initialized to true since the worksheet needs to be read
         /// and the dirty write bit is initialized to false since nothing
-        /// should be read just yet.
+        /// should be read just yet. Should only be called by FastRead.
         /// </summary>
         /// <param name="w">Reference to an Excel COM Worksheet object.</param>
         private void TrackWorksheet(Excel.Worksheet w)
@@ -166,6 +182,17 @@ namespace NoSheet
             }
         }
 
+        /// <summary>
+        /// Internal use only. Reads multiple values from the spreadsheet backing store.
+        /// Not thread-safe! Should only ever be called by FastRead.
+        /// </summary>
+        /// <param name="celltype"></param>
+        /// <param name="usedrange"></param>
+        /// <param name="x_del"></param>
+        /// <param name="y_del"></param>
+        /// <param name="wsname"></param>
+        /// <param name="wbname"></param>
+        /// <param name="wbpath"></param>
         private void __ArrayRead(CellType celltype,
                                  Excel.Range usedrange,
                                  int x_del,
@@ -214,6 +241,17 @@ namespace NoSheet
             }
         }
 
+        /// <summary>
+        /// Internal use only. Reads a single value from the spreadsheet backing store.
+        /// Not thread-safe! Should only ever be called by FastRead.
+        /// </summary>
+        /// <param name="celltype"></param>
+        /// <param name="cell"></param>
+        /// <param name="left"></param>
+        /// <param name="top"></param>
+        /// <param name="wsname"></param>
+        /// <param name="wbname"></param>
+        /// <param name="wbpath"></param>
         private void __CellRead(CellType celltype,
                                 Excel.Range cell,
                                 int left,
@@ -243,116 +281,149 @@ namespace NoSheet
         }
 
         /// <summary>
-        /// Fluses all cached data marked as changed to
+        /// Internal use only. Updates a single value in the spreadsheet backing store.
+        /// Not thread-safe! Should only ever be called by FastUpdate.
+        /// </summary>
+        /// <param name="addr"></param>
+        private void __CellUpdate(Addr addr)
+        {
+            // get COM object
+            Excel.Range cell = GetCOMCell(addr);
+
+            // write value
+            cell.Value2 = _data[addr];
+        }
+
+        /// <summary>
+        /// Internal use only. Updates multiple values in the spreadsheet backing store.
+        /// Not thread-safe! Should only ever be called by FastUpdate.
+        /// </summary>
+        /// <param name="addrs"></param>
+        private void __RegionUpdate(IEnumerable<Addr> addrs)
+        {
+            // get the smallest region that includes all of our updates
+            SpreadsheetAST.Range region = GetRegion(addrs);
+
+            // calculate deltas to adjust addresses
+            // fo region bounds
+            int x_del = region.getXLeft();
+            int y_del = region.getYTop();
+
+            // get corresponding COM object
+            Excel.Range rng = GetCOMRange(region);
+
+            // save all of the original values
+            object[,] data = rng.Value2;
+
+            // fill with data
+            foreach (Addr addr in addrs)
+            {
+                var value = _data[addr];
+
+                // calculate addresses for offset and
+                // 1-based addressing
+                var y = addr.Y - y_del + 1;
+                var x = addr.X - x_del + 1;
+
+                // update array
+                data[y, x] = value;
+            }
+
+            // write data to COM object
+            rng.Value2 = data;
+
+            // find formulas that we may have overwritten
+            var oform = _formula_strings.Where(pair => region.ContainsAddress(pair.Key));
+
+            // fix each one
+            foreach (KeyValuePair<Addr, string> fa in oform)
+            {
+                var addr = fa.Key;
+                var value = fa.Value;
+
+                GetCOMCell(addr).Formula = value;
+            }
+        }
+
+        /// <summary>
+        /// Flushes all cached data marked as changed to
         /// the backing Excel file.  Unsets dirty write bits and
-        /// sets dirty read bits.
+        /// sets dirty read bits. This method should only ever
+        /// be called by FastRead().
         /// </summary>
         private void FastUpdate()
         {
-            if (_pending_writes.Count == 0)
+            // reads subsequent to write-lock acquisition
+            // bail-out will block until the current writer
+            // is done.
+            if (!_lock.TryEnterWriteLock(0))
             {
                 return;
             }
 
-            // iterate through the worksheets
-            foreach(KeyValuePair<string,Excel.Worksheet> kvp in _wss)
+            try
             {
-                string wsname = kvp.Key;
-                Excel.Workbook wb = kvp.Value.Parent;
-                string wbname = wb.Name;
-                string wbpath = Path.GetDirectoryName(wb.FullName);
-
-                // filter pending writes to include only addresses for this worksheet
-                var pw_filt =
-                    _pending_writes.Where(addr =>
-                        addr.A1Worksheet().Equals(wsname) &&
-                        addr.A1Workbook().Equals(wbname) &&
-                        addr.A1Path().Equals(wbpath)
-                    );
-
-                // move on if there are no applicable Addresses for this worksheet
-                if (pw_filt.Count() == 0) { continue; }
-
-                // if the value is a singleton, then don't do a range
-                // write; Excel will throw a runtime exception
-                if (pw_filt.Count() == 1)
+                if (_pending_writes.Count == 0)
                 {
-                    // get address
-                    var addr = pw_filt.First();
-
-                    // get COM object
-                    Excel.Range cell = GetCOMCell(addr);
-
-                    // write value
-                    cell.Value2 = _data[addr];
+                    return;
                 }
-                // otherwise do range write
-                else
+
+                // iterate through the worksheets
+                foreach (KeyValuePair<string, Excel.Worksheet> kvp in _wss)
                 {
-                    // get the smallest region that includes all of our updates
-                    SpreadsheetAST.Range region = GetRegion(pw_filt);
+                    string wsname = kvp.Key;
+                    Excel.Workbook wb = kvp.Value.Parent;
+                    string wbname = wb.Name;
+                    string wbpath = Path.GetDirectoryName(wb.FullName);
 
-                    // calculate deltas to adjust addresses
-                    // fo region bounds
-                    int x_del = region.getXLeft();
-                    int y_del = region.getYTop();
+                    // filter pending writes to include only addresses for this worksheet
+                    var pw_filt =
+                        _pending_writes.Where(addr =>
+                            addr.A1Worksheet().Equals(wsname) &&
+                            addr.A1Workbook().Equals(wbname) &&
+                            addr.A1Path().Equals(wbpath)
+                        );
 
-                    // get corresponding COM object
-                    Excel.Range rng = GetCOMRange(region);
+                    // move on if there are no applicable Addresses for this worksheet
+                    if (pw_filt.Count() == 0) { continue; }
 
-                    // save all of the original values
-                    object[,] data = rng.Value2;
-
-                    // fill with data
-                    foreach (Addr addr in pw_filt)
+                    // if the value is a singleton, then don't do a range
+                    // write; Excel will throw a runtime exception
+                    if (pw_filt.Count() == 1)
                     {
-                        var value = _data[addr];
-
-                        // calculate addresses for offset and
-                        // 1-based addressing
-                        var y = addr.Y - y_del + 1;
-                        var x = addr.X - x_del + 1;
-
-                        // update array
-                        data[y, x] = value;
+                        __CellUpdate(pw_filt.First());
+                    }
+                    // otherwise do range write
+                    else
+                    {
+                        __RegionUpdate(pw_filt);
                     }
 
-                    // write data to COM object
-                    rng.Value2 = data;
+                    // set dirty read bit
+                    _needs_data_read[wsname] = true;
+                }
 
-                    // find formulas that we may have overwritten
-                    var oform = _formula_strings.Where(pair => region.ContainsAddress(pair.Key));
-
-                    // fix each one
-                    foreach (KeyValuePair<Addr, string> fa in oform)
+                // ensure that dirty read bit is set for all
+                // worksheets containing the outputs
+                // of the inputs just written
+                foreach (Addr a in _pending_writes)
+                {
+                    foreach (Addr faddr in _graph.GetOutputDependencies(a))
                     {
-                        var addr = fa.Key;
-                        var value = fa.Value;
-
-                        GetCOMCell(addr).Formula = value;
+                        _needs_data_read[faddr.A1Worksheet()] = true;
                     }
                 }
 
-                // set dirty read bit
-                _needs_data_read[wsname] = true;
+                // clear pending writes
+                _pending_writes.Clear();
             }
-
-            // ensure that dirty read bit is set for all
-            // worksheets containing the outputs
-            // of the inputs just written
-            foreach (Addr a in _pending_writes)
+            finally
             {
-                foreach (Addr faddr in _graph.GetOutputDependencies(a))
-                {
-                    _needs_data_read[faddr.A1Worksheet()] = true;
-                }
+                _lock.ExitWriteLock();
             }
-
-            // clear pending writes
-            _pending_writes.Clear();
         }
 
-        private SpreadsheetAST.Range GetRegion(IEnumerable<Addr> addresses)
+        private static SpreadsheetAST.Range GetRegion(IEnumerable<Addr> addresses)
         {
             if (addresses.Count() == 0)
             {
@@ -418,81 +489,102 @@ namespace NoSheet
         /// <param name="ct"></param>
         private void FastRead(CellType ct)
         {
-            // always start by flushing pending writes
+            // always start by ensuring that pending writes have been flushed
             FastUpdate();
 
-            // We force a recalculation before the first read
-            // since Excel will otherwise use its own cached values, which
-            // may be invalid with respect to the current Excel app version's
-            // interpreter semantics.
-            if (_needs_data_read.Count() == 0)
+            // Try to acquire write lock; _lock protects the following caches which
+            // are written to by this method:  _data, _formulas, and _formulas_strings
+            // If the write lock is already held, someone is already updating the state.
+            // Thus there is no sense in waiting to update, since 1. state will be
+            // updated shortly, and 2. all subsequent reads will be safe as they will be
+            // queued behind the writer holding this lock.
+            if (!_lock.TryEnterWriteLock(0)) { return; }
+            try
             {
-                _app.CalculateFullRebuild();
+                // We force a recalculation before the first read
+                // since Excel will otherwise use its own cached values, which
+                // may be invalid with respect to the current Excel app version's
+                // interpreter semantics.
+                if (_needs_data_read.Count() == 0)
+                {
+                    _app.CalculateFullRebuild();
+                }
+
+                // bail out if no data needs to be reread;
+                // lock release handled by finally
+                if (_needs_data_read.Select(pair => pair.Value == true).Count() == 0)
+                {
+                    return;
+                }
+
+                var wbpath_o = FSharpOption<string>.Some(_workbook_directory);
+                var wbname_o = FSharpOption<string>.Some(_workbook_name);
+
+                foreach (Excel.Worksheet ws in _wb.Worksheets)
+                {
+                    // keep track of this worksheet
+                    TrackWorksheet(ws);
+
+                    // get worksheet name
+                    var wsname = ws.Name;
+                    var wsname_o = FSharpOption<string>.Some(wsname);
+
+                    // only read sheet if dirty bit is set
+                    // the above call to TrackWorksheet will
+                    // init the dirty bit to true on inital read
+                    if (ct == CellType.Data)
+                    {
+                        if (!_needs_data_read[wsname]) { continue; }
+                    }
+                    else
+                    {
+                        if (!_needs_formula_read[wsname]) { continue; }
+                    }
+
+                    // get used range
+                    Excel.Range ur = ws.UsedRange;
+
+                    // calculate offsets
+                    var left = ur.Column;
+                    var right = ur.Columns.Count + left - 1;
+                    var top = ur.Row;
+                    var bottom = ur.Rows.Count + top - 1;
+
+                    // sometimes the Used Range is a range
+                    if (left != right || top != bottom)
+                    {
+                        // adjust offsets for Excel 1-based addressing
+                        var x_del = left - 1;
+                        var y_del = top - 1;
+
+                        __ArrayRead(ct, ur, x_del, y_del, wsname_o, wbname_o, wbpath_o);
+                    }
+                    // and other times it is a single cell
+                    else
+                    {
+                        __CellRead(ct, ur, left, top, wsname_o, wbname_o, wbpath_o);
+                    }
+
+                    // unset needs read bit
+                    if (ct == CellType.Data)
+                    {
+                        _needs_data_read[wsname] = false;
+                    }
+                    else
+                    {
+                        _needs_formula_read[wsname] = false;
+                    }
+
+                    // if we just reread formulas, we need to rebuild the graph
+                    if (ct == CellType.Formula)
+                    {
+                        _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
+                    }
+                }
             }
-
-            var wbpath_o = FSharpOption<string>.Some(Path.GetDirectoryName(_wb.FullName));
-            var wbname_o = FSharpOption<string>.Some(_wb.Name);
-
-            foreach (Excel.Worksheet ws in _wb.Worksheets)
+            finally
             {
-                // keep track of this worksheet
-                TrackWorksheet(ws);
-
-                // get worksheet name
-                var wsname = ws.Name;
-                var wsname_o = FSharpOption<string>.Some(wsname);
-
-                // only read sheet if dirty bit is set
-                // the above call to TrackWorksheet will
-                // init the dirty bit to true on inital read
-                if (ct == CellType.Data)
-                {
-                    if (!_needs_data_read[wsname]) { continue; }
-                }
-                else
-                {
-                    if (!_needs_formula_read[wsname]) { continue; }
-                }
-
-                // get used range
-                Excel.Range ur = ws.UsedRange;
-
-                // calculate offsets
-                var left = ur.Column;
-                var right = ur.Columns.Count + left - 1;
-                var top = ur.Row;
-                var bottom = ur.Rows.Count + top - 1;
-
-                // sometimes the Used Range is a range
-                if (left != right || top != bottom)
-                {
-                    // adjust offsets for Excel 1-based addressing
-                    var x_del = left - 1;
-                    var y_del = top - 1;
-
-                    __ArrayRead(ct, ur, x_del, y_del, wsname_o, wbname_o, wbpath_o);
-                }
-                // and other times it is a single cell
-                else
-                {
-                    __CellRead(ct, ur, left, top, wsname_o, wbname_o, wbpath_o);
-                }
-
-                // unset needs read bit
-                if (ct == CellType.Data)
-                {
-                    _needs_data_read[wsname] = false;
-                }
-                else
-                {
-                    _needs_formula_read[wsname] = false;
-                }
-
-                // if we just reread formulas, we need to rebuild the graph
-                if (ct == CellType.Formula)
-                {
-                    _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
-                }
+                _lock.ExitWriteLock();
             }
         }
 
@@ -511,42 +603,49 @@ namespace NoSheet
 
             // This call is stupid. See:
             // http://msdn.microsoft.com/en-us/library/microsoft.office.interop.excel.workbooks.open%28v=office.11%29.aspx
-            _app.Workbooks.Open(filename, // FileName (String)
-                                XlUpdateLinks.Yes, // UpdateLinks (XlUpdateLinks enum)
-                                true, // ReadOnly (Boolean)
-                                Missing.Value, // Format (int?)
-                                "thisisnotapassword", // Password (String)
-                                Missing.Value, // WriteResPassword (String)
-                                true, // IgnoreReadOnlyRecommended (Boolean)
-                                Missing.Value, // Origin (XlPlatform enum)
-                                Missing.Value, // Delimiter; if the filetype is txt (String)
-                                Missing.Value, // Editable; not what you think (Boolean)
-                                false, // Notify (Boolean)
-                                Missing.Value, // Converter(int)
-                                false, // AddToMru (Boolean)
-                                Missing.Value, // Local; really "use my locale?" (Boolean)
-                                XlCorruptLoad.RepairFile); // CorruptLoad (XlCorruptLoad enum)
+            _app.Workbooks.Open(filename,                   // FileName (String)
+                                XlUpdateLinks.Yes,          // UpdateLinks (XlUpdateLinks enum)
+                                true,                       // ReadOnly (Boolean)
+                                Missing.Value,              // Format (int?)
+                                "thisisnotapassword",       // Password (String)
+                                Missing.Value,              // WriteResPassword (String)
+                                true,                       // IgnoreReadOnlyRecommended (Boolean)
+                                Missing.Value,              // Origin (XlPlatform enum)
+                                Missing.Value,              // Delimiter; if the filetype is txt (String)
+                                Missing.Value,              // Editable; not what you think (Boolean)
+                                false,                      // Notify (Boolean)
+                                Missing.Value,              // Converter(int)
+                                false,                      // AddToMru (Boolean)
+                                Missing.Value,              // Local; really "use my locale?" (Boolean)
+                                XlCorruptLoad.RepairFile);  // CorruptLoad (XlCorruptLoad enum)
 
             return _app.Workbooks[1];
         }
 
+        /// <summary>
+        /// For internal use only.  Use breaks thread-safe abstraction provided by
+        /// ExcelSpreadsheet API.
+        /// </summary>
+        /// <param name="address"></param>
+        /// <returns></returns>
         internal Excel.Range GetCOMCell(Addr address)
         {
             var cell_ws = address.A1Worksheet();
             return _wss[cell_ws].get_Range(address.A1Local());
         }
 
+        /// <summary>
+        /// For internal use only.  Use breaks thread-safe abstraction provided by
+        /// ExcelSpreadsheet API.
+        /// </summary>
+        /// <param name="range"></param>
+        /// <returns></returns>
         internal Excel.Range GetCOMRange(SpreadsheetAST.Range range)
         {
             var tla = range.TopLeftAddress();
             var bra = range.BottomRightAddress();
 
             return _wss[range.GetWorksheetName()].get_Range(tla.A1Local(), bra.A1Local());
-        }
-
-        internal Excel.Workbook GetCOMWorkbook()
-        {
-            return _wb;
         }
 
         private static Addr AddressFromCOMObject(Excel.Range com, Excel.Workbook wb) {
@@ -562,36 +661,6 @@ namespace NoSheet
                                            FSharpOption<string>.Some(wsname),
                                            FSharpOption<string>.Some(wbname),
                                            FSharpOption<string>.Some(path));
-        }
-
-        private IEnumerable<SpreadsheetAST.Range> GetReferencesFromFormula(string formula, Excel.Workbook wb, Excel.Worksheet ws)
-        {
-            throw new NotImplementedException();
-        }
-
-        public void Dispose()
-        {
-            // release each worksheet COM object
-            foreach (KeyValuePair<string,Excel.Worksheet> pair in _wss)
-            {
-                Marshal.ReleaseComObject(pair.Value);
-            }
-
-            // nullify worksheet collection
-            _wss.Clear();
-            _wss = null;
-
-            // close workbook
-            _wb.Close();
-
-            // release COM object
-            Marshal.ReleaseComObject(_wb);
-
-            // nullify ref
-            _wb = null;
-
-            // poke GC
-            GC.Collect();
         }
 
         /// <summary>
@@ -755,26 +824,10 @@ namespace NoSheet
         {
             get {
                 // lazy update
-                FastRead(CellType.Data);
                 FastRead(CellType.Formula);
 
                 return _formulas;
             }
-        }
-
-        internal bool HasPendingWrite()
-        {
-            return _pending_writes.Count > 0;
-        }
-
-        internal bool HasPendingDataRead()
-        {
-            return _needs_data_read.Select(pair => pair.Value == true).Count() > 0;
-        }
-
-        internal bool HasPendingFormulaRead()
-        {
-            return _needs_formula_read.Select(pair => pair.Value == true).Count() > 0;
         }
 
         /// <summary>
@@ -782,7 +835,15 @@ namespace NoSheet
         /// </summary>
         public void Save()
         {
-            _wb.Save();
+            _lock.EnterWriteLock();
+            try
+            {
+                _wb.Save();
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
         }
 
         /// <summary>
@@ -805,29 +866,39 @@ namespace NoSheet
         /// <returns></returns>
         public bool SaveAs(string filename, FileFormat fileformat)
         {
-            if (File.Exists(filename))
+            _lock.EnterWriteLock();
+            try
             {
-                return false;
+                if (File.Exists(filename))
+                {
+                    return false;
+                }
+
+                _wb.SaveAs(filename,                                            // filename
+                           fileformat,                                          // FileFormat enum
+                           Type.Missing,                                        // password
+                           Type.Missing,                                        // write reservation password
+                           false,                                               // readonly recommended
+                           false,                                               // create backup
+                           Excel.XlSaveAsAccessMode.xlExclusive,                // access mode
+                           Excel.XlSaveConflictResolution.xlLocalSessionChanges,// conflict resolution policy
+                           false,                                               // add to MRU list
+                           Type.Missing,                                        // codepage (ignored)
+                           Type.Missing,                                        // visual layout (ignored)
+                           true                                                 // true == "Excel language"; false == "VBA language"
+                          );
+
+                // when someone changes the name of the workbook, our data structures need to be updated
+                _needs_data_read.ToDictionary(pair => pair.Key, pair => true);
+                _needs_formula_read.ToDictionary(pair => pair.Key, pair => true);
+                _graph = null;
+                _workbook_directory = Path.GetDirectoryName(_wb.FullName);
+                _workbook_name = _wb.Name;
             }
-
-            _wb.SaveAs(filename,                                            // filename
-                       fileformat,                                          // FileFormat enum
-                       Type.Missing,                                        // password
-                       Type.Missing,                                        // write reservation password
-                       false,                                               // readonly recommended
-                       false,                                               // create backup
-                       Excel.XlSaveAsAccessMode.xlExclusive,                // access mode
-                       Excel.XlSaveConflictResolution.xlLocalSessionChanges,// conflict resolution policy
-                       false,                                               // add to MRU list
-                       Type.Missing,                                        // codepage (ignored)
-                       Type.Missing,                                        // visual layout (ignored)
-                       true                                                 // true == "Excel language"; false == "VBA language"
-                      );
-
-            // when someone changes the name of the workbook, our data structures need to be updated
-            _needs_data_read.ToDictionary(pair => pair.Key, pair => true);
-            _needs_formula_read.ToDictionary(pair => pair.Key, pair => true);
-            _graph = null;
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
 
             return true;
         }
@@ -838,7 +909,19 @@ namespace NoSheet
         /// <returns></returns>
         public string[] WorksheetNames
         {
-            get { return _wss.Select(pair => pair.Key).ToArray(); }
+            get {
+                string[] ss;
+                _lock.EnterReadLock();
+                try
+                {
+                    ss = _wss.Select(pair => pair.Key).ToArray();
+                }
+                finally
+                {
+                    _lock.ExitReadLock();
+                }
+                return ss;
+            }
         }
         
         /// <summary>
@@ -846,7 +929,19 @@ namespace NoSheet
         /// </summary>
         public string WorkbookName
         {
-            get { return _wb.Name; }
+            get {
+                string s;
+                _lock.EnterReadLock();
+                try
+                {
+                    s = _workbook_name;
+                }
+                finally
+                {
+                    _lock.ExitReadLock();
+                }
+                return s;
+            }
         }
 
         /// <summary>
@@ -854,7 +949,58 @@ namespace NoSheet
         /// </summary>
         public string Directory
         {
-            get { return Path.GetDirectoryName(_wb.FullName); }
+            get
+            {
+                string s;
+                _lock.EnterReadLock();
+                try
+                {
+                    s = _workbook_directory;
+                }
+                finally
+                {
+                    _lock.ExitReadLock();
+                }
+                return s;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Increment(ref _disposed) == 1)
+            {
+                // we will block here indefinitely until all readers
+                // and writers release their locks
+                _lock.EnterWriteLock();
+                try
+                {
+                    // release each worksheet COM object
+                    foreach (KeyValuePair<string, Excel.Worksheet> pair in _wss)
+                    {
+                        Marshal.ReleaseComObject(pair.Value);
+                    }
+
+                    // nullify worksheet collection
+                    _wss.Clear();
+                    _wss = null;
+
+                    // close workbook
+                    _wb.Close();
+
+                    // release COM object
+                    Marshal.ReleaseComObject(_wb);
+
+                    // nullify ref
+                    _wb = null;
+
+                    // poke GC
+                    GC.Collect();
+                }
+                finally
+                {
+                    _lock.ExitWriteLock();
+                }
+            }
         }
     }
 
