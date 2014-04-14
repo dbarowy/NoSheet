@@ -9,11 +9,17 @@
         // the addresses of all formulas in the graph
         let formula_addresses = Map.toSeq fs |> Seq.map (fun (addr,_) -> addr) |> Set.ofSeq
 
+        // a map of the input ranges for a formula output (i.e., Addr -> Set<Range>)
+        let formula_ranges =
+            Map.map (fun addr expr ->
+                SpreadsheetUtility.GetRangesFromExpr(expr)
+            ) fs
+
         // a map of the input addresses for a formula output (i.e., Addr -> Set<Addr>)
         // note that some input addresses represent data and others represent formulas
         let formula_inputs =
             Map.map (fun addr expr ->
-                let ranges = SpreadsheetUtility.GetRangesFromExpr(expr)
+                let ranges = formula_ranges.[addr]
                 let addrs = SpreadsheetUtility.GetAddressesFromExpr(expr)
                 let raddrs = Set.unionMany (Set.map (fun (r: Range) -> r.GetAddresses()) ranges)
                 Set.union addrs raddrs
@@ -49,24 +55,29 @@
             | Some(addrs) -> addrs
             | None -> Set.empty
 
-        // this method returns a set of all of addresses of formulas
+        // this method returns an array of all of addresses of formulas
         // if only_terminals = true, then we only return those formulas
         // that are not themselves inputs to other formulas
-        member self.FormulaAddresses(only_terminals: bool) : Set<Address> =
+        member self.FormulaAddresses(only_terminals: bool) : Address[] =
             if only_terminals then
                 Set.filter (fun addr ->
                     not (formula_inputs.ContainsKey addr)
-                ) formula_addresses
+                ) formula_addresses |> Set.toArray
             else
-                formula_addresses
+                formula_addresses |> Set.toArray
 
-        // this method returns a set of homogenous inputs (a set of inputs)
-        // for the computation
-        member self.HomogeneousInputs : Set<Set<Address>> =
+        // this method returns an array of homogenous input vectors
+        // (a set of input addresses) for the computation
+        member self.HomogeneousInputs : Range[] =
             // for now, we do what the old CheckCell did: just
-            // return input ranges
-            Seq.map (fun (addr: Address) ->
-                Seq.map (fun (r: Range) ->
-                    r.GetAddresses()
-                ) (SpreadsheetUtility.GetRangesFromExpr(fs.[addr]))
-            ) formula_addresses |> Set.ofSeq
+            // return input ranges that include at least one
+            // data cell
+            Set.map (fun (addr: Address) ->
+                // eliminate ranges that don't have at
+                // least one data element
+                Set.filter (fun (rng: Range) ->
+                    Set.exists (fun elem ->
+                        ds.ContainsKey(elem)
+                    ) (rng.GetAddresses())
+                ) (formula_ranges.[addr])
+            ) formula_addresses |> Set.unionMany |> Set.toArray
