@@ -994,8 +994,14 @@ namespace NoSheet
                           );
 
                 // when someone changes the name of the workbook, our data structures need to be updated
-                _needs_data_read = _needs_data_read.ToDictionary(pair => pair.Key, pair => true);
-                _needs_formula_read = _needs_formula_read.ToDictionary(pair => pair.Key, pair => true);
+                foreach (KeyValuePair<string, bool> pair in _needs_data_read)
+                {
+                    _needs_data_read[pair.Key] = true;
+                }
+                foreach (KeyValuePair<string, bool> pair in _needs_formula_read)
+                {
+                    _needs_formula_read[pair.Key] = true;
+                }
                 _workbook_directory = Path.GetDirectoryName(_wb.FullName);
                 _workbook_name = _wb.Name;
             }
