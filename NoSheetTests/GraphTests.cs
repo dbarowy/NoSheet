@@ -2,6 +2,7 @@
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using NoSheet;
 using SpreadsheetAST;
+using System.Linq;
 
 namespace NoSheetTests
 {
@@ -18,14 +19,18 @@ namespace NoSheetTests
 
             using (var ss = new ExcelSpreadsheet(filename))
             {
-                var rs = ss.HomogeneousInputs;
+                // the names of the homogeneous ranges
+                var rngname1 = "[" + filename + "]Sheet1!A3:A4";
+                var rngname2 = "[" + filename + "]Sheet1!A1:A4";
 
-                foreach (SpreadsheetAST.Range r in rs)
-                {
-                    var rstr = r.A1FullyQualified();
-                }
+                // there should be a two homogeneous input ranges
+                string[] rs = ss.HomogeneousInputs.Select((SpreadsheetAST.Range rng) => rng.A1FullyQualified()).ToArray();
 
-                Assert.IsTrue(rs.Length > 0);
+                // check for the known ranges
+                Assert.IsTrue(rs.Contains(rngname1));
+                Assert.IsTrue(rs.Contains(rngname2));
+
+                Assert.IsTrue(rs.Length == 2);
             }
         }
     }

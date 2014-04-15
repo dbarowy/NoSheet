@@ -108,8 +108,7 @@
                  self.Y > rng.getYBottom())
         member self.InsideAddr(addr: Address) : bool =
             self.X = addr.X && self.Y = addr.Y
-        override self.ToString() =
-            "(" + self.Y.ToString() + "," + self.X.ToString() + ")"
+        override self.ToString() = self.A1FullyQualified()
         static member CharColToInt(col: string) : int =
             let rec ccti(idx: int) : int =
                 let ltr = (int col.[idx]) - 64
@@ -170,7 +169,8 @@
         member self.A1FullyQualified() : string =
             let wsname = _tl.A1Worksheet()
             let wbname = _tl.A1Workbook()
-            "[" + wbname + "]" + wsname + "!" + _tl.A1Local() + ":" + _br.A1Local()
+            let wbpath = _tl.A1Path()
+            "[" + IO.Path.Combine(wbpath, wbname) + "]" + wsname + "!" + _tl.A1Local() + ":" + _br.A1Local()
         member self.InsideRange(rng: Range) : bool =
             if rng.TopLeftAddress().A1Path() <> self.TopLeftAddress().A1Path() ||
                rng.TopLeftAddress().A1Workbook() <> self.TopLeftAddress().A1Workbook() ||

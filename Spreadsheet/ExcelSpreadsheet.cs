@@ -559,7 +559,7 @@ namespace NoSheet
             // if we just reread formulas, we need to rebuild the graph
             if (ct == CellType.Formula)
             {
-                _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
+                _graph = new Graph.DirectedAcyclicGraph(_formulas);
             }
         }
 
