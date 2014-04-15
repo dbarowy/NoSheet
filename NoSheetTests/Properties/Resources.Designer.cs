@@ -73,6 +73,16 @@ namespace NoSheetTests.Properties {
         /// <summary>
         ///   Looks up a localized resource of type System.Byte[].
         /// </summary>
+        internal static byte[] RangeVariations {
+            get {
+                object obj = ResourceManager.GetObject("RangeVariations", resourceCulture);
+                return ((byte[])(obj));
+            }
+        }
+        
+        /// <summary>
+        ///   Looks up a localized resource of type System.Byte[].
+        /// </summary>
         internal static byte[] SimpleWorkbook {
             get {
                 object obj = ResourceManager.GetObject("SimpleWorkbook", resourceCulture);

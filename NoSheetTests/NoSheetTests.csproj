@@ -61,6 +61,7 @@
       <DependentUpon>Resources.resx</DependentUpon>
     </Compile>
     <Compile Include="ResourceLoader.cs" />
+    <Compile Include="GraphTests.cs" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Properties\Resources.resx">
@@ -71,6 +72,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="TestData\Interleaved.xlsx">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Include="TestData\RangeVariations.xlsx">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
     <None Include="TestData\SimpleWorkbook.xlsx">

@@ -21,6 +21,7 @@ namespace NoSheet
         // Properties
         string                          Directory { get; }
         Dictionary<Address, Expression> Formulas { get; }
+        Range[]                         HomogeneousInputs { get; }
         Dictionary<Address, string>     Values { get; }
         string                          WorkbookName { get; }
         string[]                        WorksheetNames { get; }
