@@ -45,7 +45,7 @@ namespace NoSheetTests
 
             // get SaveAs path
             string newfilename = Path.Combine(Path.GetDirectoryName(filename),
-                                              Path.GetFileNameWithoutExtension(filename) + "2.xlsx");
+                                              Path.GetFileNameWithoutExtension(filename) + "_temp.xlsx");
 
             // ensure that the file doesn't already exist
             Assert.IsFalse(File.Exists(newfilename));
@@ -79,7 +79,7 @@ namespace NoSheetTests
             // make a copy of the file to the following path
             string newfilename = Path.Combine(Path.GetDirectoryName(filename),
                                               Path.GetFileNameWithoutExtension(filename) +
-                                              "_flushtest.xlsx");
+                                              "_temp.xlsx");
 
             // ensure that the file doesn't already exist
             Assert.IsFalse(File.Exists(newfilename));
@@ -166,7 +166,7 @@ namespace NoSheetTests
             // make a copy of the file to the following path
             string newfilename = Path.Combine(Path.GetDirectoryName(filename),
                                               Path.GetFileNameWithoutExtension(filename) +
-                                              "_flushrangetest.xlsx");
+                                              "_temp.xlsx");
 
             // ensure that the file doesn't already exist
             Assert.IsFalse(File.Exists(newfilename));
@@ -247,7 +247,7 @@ namespace NoSheetTests
             // make a copy of the file to the following path
             string newfilename = Path.Combine(Path.GetDirectoryName(filename),
                                               Path.GetFileNameWithoutExtension(filename) +
-                                              "_itest.xlsx");
+                                              "_temp.xlsx");
 
             // ensure that the file doesn't already exist
             Assert.IsFalse(File.Exists(newfilename));

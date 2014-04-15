@@ -848,9 +848,10 @@ namespace NoSheet
         {
             lock (_lock)
             {
-                ReadFromBackingStore(CellType.Formula);
-                ReadFromBackingStore(CellType.Data);
+                // flush changes to COM layer
+                WriteToBackingStore();
 
+                // flush COM to disk
                 _wb.Save();
             }
         }
@@ -876,14 +877,15 @@ namespace NoSheet
         public bool SaveAs(string filename, FileFormat fileformat)
         {
             lock (_lock) {
-            ReadFromBackingStore(CellType.Formula);
-            ReadFromBackingStore(CellType.Data);
+                // flush changes to COM layer
+                WriteToBackingStore();
 
                 if (File.Exists(filename))
                 {
                     return false;
                 }
 
+                // flush changes to disk
                 _wb.SaveAs(filename,                                            // filename
                            fileformat,                                          // FileFormat enum
                            Type.Missing,                                        // password
@@ -900,11 +902,11 @@ namespace NoSheet
 
                 // when someone changes the name of the workbook, we need to reread the
                 // cells so that our addresses are modified appropriately
-                foreach (KeyValuePair<string, bool> pair in _needs_data_read)
+                foreach (KeyValuePair<string, bool> pair in _needs_data_read.ToList())
                 {
                     _needs_data_read[pair.Key] = true;
                 }
-                foreach (KeyValuePair<string, bool> pair in _needs_formula_read)
+                foreach (KeyValuePair<string, bool> pair in _needs_formula_read.ToList())
                 {
                     _needs_formula_read[pair.Key] = true;
                 }
