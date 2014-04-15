@@ -24,7 +24,7 @@ namespace NoSheet
     public class ExcelSpreadsheet : ISpreadsheet, IDisposable
     {
         // reader-writer lock object
-        private ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
+        private object _lock = new object();
 
         // interlock for safe disposal
         private int _disposed = 0;
@@ -359,7 +359,7 @@ namespace NoSheet
         /// Flushes all cached data marked as changed to
         /// the backing Excel file.  Unsets dirty write bits and
         /// sets dirty read bits. This method should only ever
-        /// be called by FastRead(). Thread-safe.
+        /// be called by FastRead(). Not thread-safe.
         /// </summary>
         private void WriteToBackingStore()
         {
@@ -369,77 +369,54 @@ namespace NoSheet
                 return;
             }
 
-            // otherwise, acquire lock and process writes.
-            // if someone else is holding a write lock
-            // then we don't need to do any work since it is
-            // presently being performed
-            if (!_lock.TryEnterWriteLock(0))
+            // iterate through the worksheets
+            foreach (KeyValuePair<string, Excel.Worksheet> kvp in _wss)
             {
-                return;
-            }
+                string wsname = kvp.Key;
+                Excel.Workbook wb = kvp.Value.Parent;
+                string wbname = wb.Name;
+                string wbpath = Path.GetDirectoryName(wb.FullName);
 
-            try
-            {
-                // check pending writes again because of
-                // potential race above
-                if (_pending_writes.Count == 0)
+                // filter pending writes to include only addresses for this worksheet
+                var pw_filt =
+                    _pending_writes.Where(addr =>
+                        addr.A1Worksheet().Equals(wsname) &&
+                        addr.A1Workbook().Equals(wbname) &&
+                        addr.A1Path().Equals(wbpath)
+                    );
+
+                // move on if there are no applicable Addresses for this worksheet
+                if (pw_filt.Count() == 0) { continue; }
+
+                // if the value is a singleton, then don't do a range
+                // write; Excel will throw a runtime exception
+                if (pw_filt.Count() == 1)
                 {
-                    return;
+                    __CellUpdate(pw_filt.First());
+                }
+                // otherwise do range write
+                else
+                {
+                    __RegionUpdate(pw_filt);
                 }
 
-                // iterate through the worksheets
-                foreach (KeyValuePair<string, Excel.Worksheet> kvp in _wss)
-                {
-                    string wsname = kvp.Key;
-                    Excel.Workbook wb = kvp.Value.Parent;
-                    string wbname = wb.Name;
-                    string wbpath = Path.GetDirectoryName(wb.FullName);
-
-                    // filter pending writes to include only addresses for this worksheet
-                    var pw_filt =
-                        _pending_writes.Where(addr =>
-                            addr.A1Worksheet().Equals(wsname) &&
-                            addr.A1Workbook().Equals(wbname) &&
-                            addr.A1Path().Equals(wbpath)
-                        );
-
-                    // move on if there are no applicable Addresses for this worksheet
-                    if (pw_filt.Count() == 0) { continue; }
-
-                    // if the value is a singleton, then don't do a range
-                    // write; Excel will throw a runtime exception
-                    if (pw_filt.Count() == 1)
-                    {
-                        __CellUpdate(pw_filt.First());
-                    }
-                    // otherwise do range write
-                    else
-                    {
-                        __RegionUpdate(pw_filt);
-                    }
-
-                    // set dirty read bit
-                    _needs_data_read[wsname] = true;
-                }
-
-                // ensure that dirty read bit is set for all
-                // worksheets containing the outputs
-                // of the inputs just written
-                foreach (Addr a in _pending_writes)
-                {
-                    foreach (Addr faddr in _graph.GetOutputDependencies(a))
-                    {
-                        _needs_data_read[faddr.A1Worksheet()] = true;
-                    }
-                }
-
-                // clear pending writes
-                _pending_writes.Clear();
+                // set dirty read bit
+                _needs_data_read[wsname] = true;
             }
-            finally
+
+            // ensure that dirty read bit is set for all
+            // worksheets containing the outputs
+            // of the inputs just written
+            foreach (Addr a in _pending_writes)
             {
-                _lock.ExitWriteLock();
+                foreach (Addr faddr in _graph.GetOutputDependencies(a))
+                {
+                    _needs_data_read[faddr.A1Worksheet()] = true;
+                }
             }
+
+            // clear pending writes
+            _pending_writes.Clear();
         }
 
         /// <summary>
@@ -509,7 +486,7 @@ namespace NoSheet
         /// <summary>
         /// Reads all values whose worksheets have dirty read bits set to true,
         /// or all values if worksheet has never been read.  Unsets dirty read bits.
-        /// Thread-safe.
+        /// Not thread-safe.
         /// </summary>
         /// <param name="ct"></param>
         private void ReadFromBackingStore(CellType ct)
@@ -523,86 +500,66 @@ namespace NoSheet
             if (ct == CellType.Formula &&
                 !_needs_formula_read.ContainsValue(true)) { return; }
 
-            // Try to acquire write lock; _lock protects the following caches which
-            // are written to by this method:  _data, _formulas, and _formulas_strings
-            // If the write lock is already held, someone is already updating the state.
-            // Thus there is no sense in waiting to update, since 1. state will be
-            // updated shortly, and 2. all subsequent reads will be safe as they will be
-            // queued behind the writer holding this lock.
-            if (!_lock.TryEnterWriteLock(0)) { return; }
-            try
+            var wbpath_o = FSharpOption<string>.Some(_workbook_directory);
+            var wbname_o = FSharpOption<string>.Some(_workbook_name);
+
+            foreach (KeyValuePair<string,Excel.Worksheet> pair in _wss)
             {
-                // check again because of possible race above
-                if (ct == CellType.Data &&
-                    !_needs_data_read.ContainsValue(true)) { return; }
-                if (ct == CellType.Formula &&
-                    !_needs_formula_read.ContainsValue(true)) { return; }
+                // get worksheet name
+                var wsname = pair.Key;
+                var wsname_o = FSharpOption<string>.Some(wsname);
 
-                var wbpath_o = FSharpOption<string>.Some(_workbook_directory);
-                var wbname_o = FSharpOption<string>.Some(_workbook_name);
-
-                foreach (KeyValuePair<string,Excel.Worksheet> pair in _wss)
+                // only read sheet if dirty bit is set
+                // the above call to TrackWorksheet will
+                // init the dirty bit to true on inital read
+                if (ct == CellType.Data)
                 {
-                    // get worksheet name
-                    var wsname = pair.Key;
-                    var wsname_o = FSharpOption<string>.Some(wsname);
-
-                    // only read sheet if dirty bit is set
-                    // the above call to TrackWorksheet will
-                    // init the dirty bit to true on inital read
-                    if (ct == CellType.Data)
-                    {
-                        if (!_needs_data_read[wsname]) { continue; }
-                    }
-                    else
-                    {
-                        if (!_needs_formula_read[wsname]) { continue; }
-                    }
-
-                    // get used range
-                    Excel.Range ur = pair.Value.UsedRange;
-
-                    // calculate offsets
-                    var left = ur.Column;
-                    var right = ur.Columns.Count + left - 1;
-                    var top = ur.Row;
-                    var bottom = ur.Rows.Count + top - 1;
-
-                    // sometimes the Used Range is a range
-                    if (left != right || top != bottom)
-                    {
-                        // adjust offsets for Excel 1-based addressing
-                        var x_del = left - 1;
-                        var y_del = top - 1;
-
-                        __ArrayRead(ct, ur, x_del, y_del, wsname_o, wbname_o, wbpath_o);
-                    }
-                    // and other times it is a single cell
-                    else
-                    {
-                        __CellRead(ct, ur, left, top, wsname_o, wbname_o, wbpath_o);
-                    }
-
-                    // unset needs read bit
-                    if (ct == CellType.Data)
-                    {
-                        _needs_data_read[wsname] = false;
-                    }
-                    else
-                    {
-                        _needs_formula_read[wsname] = false;
-                    }
+                    if (!_needs_data_read[wsname]) { continue; }
+                }
+                else
+                {
+                    if (!_needs_formula_read[wsname]) { continue; }
                 }
 
-                // if we just reread formulas, we need to rebuild the graph
-                if (ct == CellType.Formula)
+                // get used range
+                Excel.Range ur = pair.Value.UsedRange;
+
+                // calculate offsets
+                var left = ur.Column;
+                var right = ur.Columns.Count + left - 1;
+                var top = ur.Row;
+                var bottom = ur.Rows.Count + top - 1;
+
+                // sometimes the Used Range is a range
+                if (left != right || top != bottom)
                 {
-                    _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
+                    // adjust offsets for Excel 1-based addressing
+                    var x_del = left - 1;
+                    var y_del = top - 1;
+
+                    __ArrayRead(ct, ur, x_del, y_del, wsname_o, wbname_o, wbpath_o);
+                }
+                // and other times it is a single cell
+                else
+                {
+                    __CellRead(ct, ur, left, top, wsname_o, wbname_o, wbpath_o);
+                }
+
+                // unset needs read bit
+                if (ct == CellType.Data)
+                {
+                    _needs_data_read[wsname] = false;
+                }
+                else
+                {
+                    _needs_formula_read[wsname] = false;
                 }
             }
-            finally
+
+            // if we just reread formulas, we need to rebuild the graph
+            if (ct == CellType.Formula)
             {
-                _lock.ExitWriteLock();
+                _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
             }
         }
 
@@ -744,14 +701,12 @@ namespace NoSheet
 
         public void SetValueAt(Addr address, string value)
         {
-            // if a dependency graph has never been built,
-            // now is the time to do so.
-            ReadFromBackingStore(CellType.Formula);
-
-            // Blocks until it is our turn to write.
-            _lock.EnterWriteLock();
-            try
+            lock (_lock)
             {
+                // if a dependency graph has never been built,
+                // now is the time to do so.
+                ReadFromBackingStore(CellType.Formula);
+
                 // we do not write to formula outputs
                 if (_formulas.ContainsKey(address))
                 {
@@ -763,20 +718,14 @@ namespace NoSheet
                     _pending_writes.Add(address);
                 }
             }
-            finally
-            {
-                _lock.ExitWriteLock();
-            }
         }
 
         public string ValueAt(Addr address)
         {
-            // lazy update
-            ReadFromBackingStore(CellType.Data);
-
-            _lock.EnterReadLock();
-            try
+            lock (_lock)
             {
+                ReadFromBackingStore(CellType.Data);
+
                 string value;
                 if (_data.TryGetValue(address, out value))
                 {
@@ -787,20 +736,14 @@ namespace NoSheet
                     return String.Empty;
                 }
             }
-            finally
-            {
-                _lock.ExitReadLock();
-            }
         }
 
         public Expr FormulaAt(Addr address)
         {
-            // lazy update
-            ReadFromBackingStore(CellType.Formula);
-
-            _lock.EnterReadLock();
-            try
+            lock (_lock)
             {
+                ReadFromBackingStore(CellType.Formula);
+
                 Expr f;
                 if (_formulas.TryGetValue(address, out f))
                 {
@@ -810,10 +753,6 @@ namespace NoSheet
                 {
                     throw new IsNotFormulaException(address);
                 }
-            }
-            finally
-            {
-                _lock.ExitReadLock();
             }
         }
 
@@ -848,15 +787,13 @@ namespace NoSheet
 
         public string FormulaAsStringAt(Addr address)
         {
-            // lazy update
-            ReadFromBackingStore(CellType.Formula); 
-
-            // TODO: this should actually use an Excel-specific
-            //       visitor, since SpreadsheetAST is supposed
-            //       to be a spreadsheet-agnostic IR
-            _lock.EnterReadLock();
-            try
+            lock (_lock)
             {
+                ReadFromBackingStore(CellType.Formula);
+
+                // TODO: this should actually use an Excel-specific
+                //       visitor, since SpreadsheetAST is supposed
+                //       to be a spreadsheet-agnostic IR
                 string f;
                 if (_formula_strings.TryGetValue(address, out f))
                 {
@@ -867,42 +804,27 @@ namespace NoSheet
                     throw new IsNotFormulaException(address);
                 }
             }
-            finally
-            {
-                _lock.ExitReadLock();
-            }
         }
 
         public bool IsFormulaAt(Addr address)
         {
-            // lazy update
-            ReadFromBackingStore(CellType.Formula);
+            lock (_lock)
+            {
+                ReadFromBackingStore(CellType.Formula);
 
-            _lock.EnterReadLock();
-            try
-            {
                 return _formulas.ContainsKey(address);
-            }
-            finally
-            {
-                _lock.ExitReadLock();
+
             }
         }
 
         public Dictionary<Addr, string> Values
         {
             get {
-                // lazy update
-                ReadFromBackingStore(CellType.Data);
+                lock (_lock)
+                {
+                    ReadFromBackingStore(CellType.Data);
 
-                _lock.EnterReadLock();
-                try
-                {
                     return _data;
-                }
-                finally
-                {
-                    _lock.ExitReadLock();
                 }
             }
         }
@@ -910,17 +832,11 @@ namespace NoSheet
         public Dictionary<Addr, Expr> Formulas
         {
             get {
-                // lazy update
-                ReadFromBackingStore(CellType.Formula);
+                lock (_lock)
+                {
+                    ReadFromBackingStore(CellType.Formula);
 
-                _lock.EnterReadLock();
-                try
-                {
                     return _formulas;
-                }
-                finally
-                {
-                    _lock.ExitReadLock();
                 }
             }
         }
@@ -930,19 +846,12 @@ namespace NoSheet
         /// </summary>
         public void Save()
         {
-            // update state; note that races between here and the
-            // actual file save are possible
-            ReadFromBackingStore(CellType.Formula);
-            ReadFromBackingStore(CellType.Data);
+            lock (_lock)
+            {
+                ReadFromBackingStore(CellType.Formula);
+                ReadFromBackingStore(CellType.Data);
 
-            _lock.EnterWriteLock();
-            try
-            {
                 _wb.Save();
-            }
-            finally
-            {
-                _lock.ExitWriteLock();
             }
         }
 
@@ -966,14 +875,10 @@ namespace NoSheet
         /// <returns></returns>
         public bool SaveAs(string filename, FileFormat fileformat)
         {
-            // update state; note that races between here and the
-            // actual file save are possible
+            lock (_lock) {
             ReadFromBackingStore(CellType.Formula);
             ReadFromBackingStore(CellType.Data);
 
-            _lock.EnterWriteLock();
-            try
-            {
                 if (File.Exists(filename))
                 {
                     return false;
@@ -993,7 +898,8 @@ namespace NoSheet
                            true                                                 // true == "Excel language"; false == "VBA language"
                           );
 
-                // when someone changes the name of the workbook, our data structures need to be updated
+                // when someone changes the name of the workbook, we need to reread the
+                // cells so that our addresses are modified appropriately
                 foreach (KeyValuePair<string, bool> pair in _needs_data_read)
                 {
                     _needs_data_read[pair.Key] = true;
@@ -1004,10 +910,6 @@ namespace NoSheet
                 }
                 _workbook_directory = Path.GetDirectoryName(_wb.FullName);
                 _workbook_name = _wb.Name;
-            }
-            finally
-            {
-                _lock.ExitWriteLock();
             }
 
             return true;
@@ -1020,17 +922,9 @@ namespace NoSheet
         public string[] WorksheetNames
         {
             get {
-                string[] ss;
-                _lock.EnterReadLock();
-                try
-                {
-                    ss = _wss.Select(pair => pair.Key).ToArray();
+                lock(_lock) {
+                    return _wss.Select(pair => pair.Key).ToArray();
                 }
-                finally
-                {
-                    _lock.ExitReadLock();
-                }
-                return ss;
             }
         }
         
@@ -1040,17 +934,9 @@ namespace NoSheet
         public string WorkbookName
         {
             get {
-                string s;
-                _lock.EnterReadLock();
-                try
-                {
-                    s = _workbook_name;
+                lock (_lock) {
+                    return _workbook_name;
                 }
-                finally
-                {
-                    _lock.ExitReadLock();
-                }
-                return s;
             }
         }
 
@@ -1061,17 +947,9 @@ namespace NoSheet
         {
             get
             {
-                string s;
-                _lock.EnterReadLock();
-                try
-                {
-                    s = _workbook_directory;
+                lock (_lock) {
+                    return _workbook_directory;
                 }
-                finally
-                {
-                    _lock.ExitReadLock();
-                }
-                return s;
             }
         }
 
@@ -1090,12 +968,12 @@ namespace NoSheet
 
         public void Dispose()
         {
+            // don't call this more than once
             if (Interlocked.Increment(ref _disposed) == 1)
             {
                 // we will block here indefinitely until all readers
                 // and writers release their locks
-                _lock.EnterWriteLock();
-                try
+                lock (_lock)
                 {
                     // release each worksheet COM object
                     foreach (KeyValuePair<string, Excel.Worksheet> pair in _wss)
@@ -1118,10 +996,6 @@ namespace NoSheet
 
                     // poke GC
                     GC.Collect();
-                }
-                finally
-                {
-                    _lock.ExitWriteLock();
                 }
             }
         }
