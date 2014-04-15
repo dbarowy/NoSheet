@@ -153,6 +153,16 @@ namespace NoSheet
             // grab names, which only change when we call Save As.
             _workbook_directory = Path.GetDirectoryName(_wb.FullName);
             _workbook_name = _wb.Name;
+
+            // get worksheets
+            foreach (Excel.Worksheet ws in _wb.Worksheets)
+            {
+                TrackWorksheet(ws);
+            }
+
+            // force a full Excel recalculation to ensure
+            // that no stale values are used.
+            _app.CalculateFullRebuild();
         }
 
         /// <summary>
@@ -169,7 +179,7 @@ namespace NoSheet
         /// and dirty bits. The dirty read bit
         /// is initialized to true since the worksheet needs to be read
         /// and the dirty write bit is initialized to false since nothing
-        /// should be read just yet. Should only be called by FastRead.
+        /// should be read just yet. Should only be called by constructor.
         /// </summary>
         /// <param name="w">Reference to an Excel COM Worksheet object.</param>
         private void TrackWorksheet(Excel.Worksheet w)
@@ -351,11 +361,18 @@ namespace NoSheet
         /// sets dirty read bits. This method should only ever
         /// be called by FastRead(). Thread-safe.
         /// </summary>
-        private void FastUpdate()
+        private void WriteToBackingStore()
         {
-            // reads subsequent to write-lock acquisition
-            // bail-out will block until the current writer
-            // is done.
+            // quick check for pending writes
+            if (_pending_writes.Count == 0)
+            {
+                return;
+            }
+
+            // otherwise, acquire lock and process writes.
+            // if someone else is holding a write lock
+            // then we don't need to do any work since it is
+            // presently being performed
             if (!_lock.TryEnterWriteLock(0))
             {
                 return;
@@ -363,6 +380,8 @@ namespace NoSheet
 
             try
             {
+                // check pending writes again because of
+                // potential race above
                 if (_pending_writes.Count == 0)
                 {
                     return;
@@ -493,10 +512,16 @@ namespace NoSheet
         /// Thread-safe.
         /// </summary>
         /// <param name="ct"></param>
-        private void FastRead(CellType ct)
+        private void ReadFromBackingStore(CellType ct)
         {
             // always start by ensuring that pending writes have been flushed
-            FastUpdate();
+            WriteToBackingStore();
+
+            // quick check to see if we need to read at all
+            if (ct == CellType.Data &&
+                !_needs_data_read.ContainsValue(true)) { return; }
+            if (ct == CellType.Formula &&
+                !_needs_formula_read.ContainsValue(true)) { return; }
 
             // Try to acquire write lock; _lock protects the following caches which
             // are written to by this method:  _data, _formulas, and _formulas_strings
@@ -507,37 +532,19 @@ namespace NoSheet
             if (!_lock.TryEnterWriteLock(0)) { return; }
             try
             {
-                // If this is the first read, force a full Excel recalculation to ensure
-                // that no stale values are used.
-                if (_needs_data_read.Count() == 0)
-                {
-                    _app.CalculateFullRebuild();
-                }
-                // bail out if no data needs to be reread;
-                // lock release handled by finally
-                else if (ct == CellType.Data
-                        && _needs_data_read.Select(pair => pair.Value == true).Count() == 0)
-                {
-                        return;
-                }
-                // bail out if no formulas need to be reread;
-                // lock release handled by finally
-                else if (ct == CellType.Formula
-                         && _needs_formula_read.Select(pair => pair.Value == true).Count() == 0)
-                {
-                    return;
-                }
+                // check again because of possible race above
+                if (ct == CellType.Data &&
+                    !_needs_data_read.ContainsValue(true)) { return; }
+                if (ct == CellType.Formula &&
+                    !_needs_formula_read.ContainsValue(true)) { return; }
 
                 var wbpath_o = FSharpOption<string>.Some(_workbook_directory);
                 var wbname_o = FSharpOption<string>.Some(_workbook_name);
 
-                foreach (Excel.Worksheet ws in _wb.Worksheets)
+                foreach (KeyValuePair<string,Excel.Worksheet> pair in _wss)
                 {
-                    // keep track of this worksheet
-                    TrackWorksheet(ws);
-
                     // get worksheet name
-                    var wsname = ws.Name;
+                    var wsname = pair.Key;
                     var wsname_o = FSharpOption<string>.Some(wsname);
 
                     // only read sheet if dirty bit is set
@@ -553,7 +560,7 @@ namespace NoSheet
                     }
 
                     // get used range
-                    Excel.Range ur = ws.UsedRange;
+                    Excel.Range ur = pair.Value.UsedRange;
 
                     // calculate offsets
                     var left = ur.Column;
@@ -585,12 +592,12 @@ namespace NoSheet
                     {
                         _needs_formula_read[wsname] = false;
                     }
+                }
 
-                    // if we just reread formulas, we need to rebuild the graph
-                    if (ct == CellType.Formula)
-                    {
-                        _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
-                    }
+                // if we just reread formulas, we need to rebuild the graph
+                if (ct == CellType.Formula)
+                {
+                    _graph = new Graph.DirectedAcyclicGraph(_formulas, _data);
                 }
             }
             finally
@@ -739,10 +746,7 @@ namespace NoSheet
         {
             // if a dependency graph has never been built,
             // now is the time to do so.
-            if (_graph == null)
-            {
-                FastRead(CellType.Formula);
-            }
+            ReadFromBackingStore(CellType.Formula);
 
             // Blocks until it is our turn to write.
             _lock.EnterWriteLock();
@@ -768,7 +772,7 @@ namespace NoSheet
         public string ValueAt(Addr address)
         {
             // lazy update
-            FastRead(CellType.Data);
+            ReadFromBackingStore(CellType.Data);
 
             _lock.EnterReadLock();
             try
@@ -792,7 +796,7 @@ namespace NoSheet
         public Expr FormulaAt(Addr address)
         {
             // lazy update
-            FastRead(CellType.Formula);
+            ReadFromBackingStore(CellType.Formula);
 
             _lock.EnterReadLock();
             try
@@ -845,7 +849,7 @@ namespace NoSheet
         public string FormulaAsStringAt(Addr address)
         {
             // lazy update
-            FastRead(CellType.Formula); 
+            ReadFromBackingStore(CellType.Formula); 
 
             // TODO: this should actually use an Excel-specific
             //       visitor, since SpreadsheetAST is supposed
@@ -872,7 +876,7 @@ namespace NoSheet
         public bool IsFormulaAt(Addr address)
         {
             // lazy update
-            FastRead(CellType.Formula);
+            ReadFromBackingStore(CellType.Formula);
 
             _lock.EnterReadLock();
             try
@@ -889,7 +893,7 @@ namespace NoSheet
         {
             get {
                 // lazy update
-                FastRead(CellType.Data);
+                ReadFromBackingStore(CellType.Data);
 
                 _lock.EnterReadLock();
                 try
@@ -907,7 +911,7 @@ namespace NoSheet
         {
             get {
                 // lazy update
-                FastRead(CellType.Formula);
+                ReadFromBackingStore(CellType.Formula);
 
                 _lock.EnterReadLock();
                 try
@@ -926,6 +930,11 @@ namespace NoSheet
         /// </summary>
         public void Save()
         {
+            // update state; note that races between here and the
+            // actual file save are possible
+            ReadFromBackingStore(CellType.Formula);
+            ReadFromBackingStore(CellType.Data);
+
             _lock.EnterWriteLock();
             try
             {
@@ -957,6 +966,11 @@ namespace NoSheet
         /// <returns></returns>
         public bool SaveAs(string filename, FileFormat fileformat)
         {
+            // update state; note that races between here and the
+            // actual file save are possible
+            ReadFromBackingStore(CellType.Formula);
+            ReadFromBackingStore(CellType.Data);
+
             _lock.EnterWriteLock();
             try
             {
@@ -980,9 +994,8 @@ namespace NoSheet
                           );
 
                 // when someone changes the name of the workbook, our data structures need to be updated
-                _needs_data_read.ToDictionary(pair => pair.Key, pair => true);
-                _needs_formula_read.ToDictionary(pair => pair.Key, pair => true);
-                _graph = null;
+                _needs_data_read = _needs_data_read.ToDictionary(pair => pair.Key, pair => true);
+                _needs_formula_read = _needs_formula_read.ToDictionary(pair => pair.Key, pair => true);
                 _workbook_directory = Path.GetDirectoryName(_wb.FullName);
                 _workbook_name = _wb.Name;
             }
@@ -1053,6 +1066,19 @@ namespace NoSheet
                     _lock.ExitReadLock();
                 }
                 return s;
+            }
+        }
+
+        /// <summary>
+        /// Returns an array of homogeneous input ranges.
+        /// </summary>
+        public SpreadsheetAST.Range[] HomogeneousInputs
+        {
+            get
+            {
+                // read formulas if they need to be updated
+                ReadFromBackingStore(CellType.Formula);
+                return _graph.HomogeneousInputs;
             }
         }
 
